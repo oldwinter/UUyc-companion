@@ -5,7 +5,7 @@ struct UUConnectionState {
     enum Event: Equatable { case connected, controllerChanged, disconnected }
     private(set) var connected = false
     private var lastSeen = Date.distantPast
-    private var controller: String?
+    private(set) var controller: String?
     private let debounce: TimeInterval = 1.5
 
     mutating func update(overlay: Bool, controllers: [String]?, now: Date) -> Event? {

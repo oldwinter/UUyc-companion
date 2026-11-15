@@ -1,27 +1,38 @@
 #!/bin/zsh
-# 构建「UUyc companion.app」（中文系统显示为「UU远程伴侣」，「UUDisplay Signing」证书签名）。
+# 构建「UUyc companion.app」（中文系统显示为「UU远程伴侣」）。
 # 用法：scripts/build-app.sh [--install]
-# 对外名称已改，内部标识保持不变：Bundle ID com.corndog.uudisplay（辅助功能授权按它识别）、
+# 内部标识保持不变：Bundle ID com.corndog.uudisplay（辅助功能授权按它识别）、
 # 可执行文件 UUDisplay / UUDisplayWatchdog、配置目录与日志文件名
-# 固定证书签名后，签名要求不随每次构建变化，升级后「辅助功能」等授权可保留（ad-hoc 签名每次都会失效）
+# 签名策略：优先使用环境变量 SIGN_IDENTITY；未指定时依次查找 "UUDisplay Signing"、"Apple Development"，
+# 若钥匙串中均无有效证书，自动降级为 ad-hoc 签名（SIGN_IDENTITY=-）。
 # --install：复制到 /Applications 并启动
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="1.1.3"
+VERSION="1.2.0"
 APP_NAME="UUyc companion"
 APP="build/$APP_NAME.app"
 LEGACY_APP="/Applications/UUDisplay.app"   # 改名前的安装位置
-SIGN_IDENTITY="${SIGN_IDENTITY:-UUDisplay Signing}"
 
-# SIGN_IDENTITY=- 表示 ad-hoc 签名（没有证书时从源码构建用；每次构建后辅助功能授权会失效）
-if [[ "$SIGN_IDENTITY" != "-" ]] && ! security find-identity -v -p codesigning | grep -q "\"$SIGN_IDENTITY\""; then
+if [[ -z "${SIGN_IDENTITY+x}" ]]; then
+  IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  if echo "$IDENTITIES" | grep -q '"UUDisplay Signing"'; then
+    SIGN_IDENTITY="UUDisplay Signing"
+  elif echo "$IDENTITIES" | grep -q '"Apple Development'; then
+    SIGN_IDENTITY="$(echo "$IDENTITIES" | grep -m1 '"Apple Development' | sed -E 's/.*"([^"]+)".*/\1/')"
+  else
+    SIGN_IDENTITY="-"
+    echo "ℹ️ 未检测到开发签名证书，自动采用 ad-hoc 签名（重新构建后需在系统设置中重新授权辅助功能）"
+  fi
+fi
+
+if [[ "$SIGN_IDENTITY" != "-" ]] && ! security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$SIGN_IDENTITY\""; then
   echo "❌ 钥匙串中找不到有效的代码签名证书「$SIGN_IDENTITY」；没有证书可用 SIGN_IDENTITY=- 改为 ad-hoc 签名" >&2
   exit 1
 fi
 
-swift build -c release --build-system native --product UUDisplay
-BIN="$(swift build -c release --build-system native --show-bin-path)/UUDisplay"
+swift build -c release --product UUDisplay
+BIN="$(swift build -c release --show-bin-path)/UUDisplay"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -30,8 +41,6 @@ cp "$BIN" "$APP/Contents/MacOS/UUDisplay"
 cp "$BIN" "$APP/Contents/MacOS/UUDisplayWatchdog"
 # PermissionFlow 资源包（本地化文案等），放 Contents/Resources 供 PermissionFlowResources 查找
 cp -R "$(dirname "$BIN")/PermissionFlow_PermissionFlow.bundle" "$APP/Contents/Resources/"
-# AboutKit 资源包（作者头像），放 Contents/Resources
-cp -R "$(dirname "$BIN")/AboutKit_AboutKit.bundle" "$APP/Contents/Resources/"
 # 功能导览配图（TourKit 从 Bundle.main 的 Resources 根目录按文件名查找）
 cp Assets/Tour/*.png "$APP/Contents/Resources/"
 # App 图标与菜单栏模板图（见 Assets/AppIcon/README.md）
@@ -68,7 +77,7 @@ printf '"CFBundleDisplayName" = "UUyc companion";\n"CFBundleName" = "UUyc compan
 codesign --force --sign "$SIGN_IDENTITY" --identifier com.corndog.uudisplay.watchdog "$APP/Contents/MacOS/UUDisplayWatchdog"
 codesign --force --sign "$SIGN_IDENTITY" --identifier com.corndog.uudisplay "$APP"
 codesign --verify --strict --deep "$APP"
-echo "✅ 已生成 $APP"
+echo "✅ 已生成 $APP（签名：$SIGN_IDENTITY）"
 
 if [[ "${1:-}" == "--install" ]]; then
   pkill -x UUDisplay 2>/dev/null && sleep 1 || true

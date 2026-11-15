@@ -34,18 +34,56 @@ enum UUReader {
     private static func role(_ el: AXUIElement) -> String? { attr(el, kAXRoleAttribute) as? String }
     private static func value(_ el: AXUIElement) -> String? { attr(el, kAXValueAttribute) as? String }
 
-    /// 先序遍历；UU 的 AX 树存在环，必须限制深度
-    private static func flatten(_ el: AXUIElement, depth: Int = 0, into out: inout [AXUIElement]) {
-        guard depth < 25 else { return }
+    private static let maxFlattenNodes = 2048
+
+    private struct AXElementKey: Hashable {
+        let element: AXUIElement
+        static func == (lhs: Self, rhs: Self) -> Bool { CFEqual(lhs.element, rhs.element) }
+        func hash(into hasher: inout Hasher) { hasher.combine(CFHash(element)) }
+    }
+
+    /// 先序遍历；UU 的 AX 树存在环，必须去重并限制深度与总节点数，防止内存膨胀或卡死。
+    private static func flatten(
+        _ el: AXUIElement,
+        depth: Int = 0,
+        visited: inout Set<AXElementKey>,
+        into out: inout [AXUIElement]
+    ) {
+        guard depth < 25, out.count < maxFlattenNodes else { return }
+        let key = AXElementKey(element: el)
+        guard visited.insert(key).inserted else { return }
         out.append(el)
-        for k in (attr(el, kAXChildrenAttribute) as? [AXUIElement]) ?? [] {
-            flatten(k, depth: depth + 1, into: &out)
+        let children: [AXUIElement] = autoreleasepool {
+            (attr(el, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+        }
+        for k in children {
+            guard out.count < maxFlattenNodes else { break }
+            flatten(k, depth: depth + 1, visited: &visited, into: &out)
         }
     }
 
+    private static func flattenTree(_ roots: [AXUIElement]) -> [AXUIElement] {
+        var visited = Set<AXElementKey>()
+        var out: [AXUIElement] = []
+        for root in roots {
+            flatten(root, visited: &visited, into: &out)
+        }
+        return out
+    }
+
+    /// 合并 windows / mainWindow / focusedWindow 并去重，覆盖全屏 Space 场景。
     private static func windows() -> [AXUIElement] {
         guard let ax = appElement() else { return [] }
-        return (attr(ax, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        var result: [AXUIElement] = (attr(ax, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+        for singleAttr in [kAXMainWindowAttribute, kAXFocusedWindowAttribute] {
+            if let w = attr(ax, singleAttr), CFGetTypeID(w) == AXUIElementGetTypeID() {
+                let win = w as! AXUIElement
+                if !result.contains(where: { CFEqual($0, win) }) {
+                    result.append(win)
+                }
+            }
+        }
+        return result
     }
 
     static var hasMainWindow: Bool { !windows().isEmpty }
@@ -55,8 +93,7 @@ enum UUReader {
     static func showMainWindow() -> Bool {
         guard let ax = appElement(), let bar = attr(ax, kAXExtrasMenuBarAttribute),
               CFGetTypeID(bar) == AXUIElementGetTypeID() else { return false }
-        var all: [AXUIElement] = []
-        flatten(bar as! AXUIElement, into: &all)
+        let all = flattenTree([bar as! AXUIElement])
         guard let item = all.first(where: { (attr($0, kAXIdentifierAttribute) as? String) == "showWindow" }) else { return false }
         return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
     }
@@ -66,8 +103,7 @@ enum UUReader {
     static func readDevices() -> [UUDevice]? {
         let wins = windows()
         guard !wins.isEmpty else { return nil }
-        var all: [AXUIElement] = []
-        wins.forEach { flatten($0, into: &all) }
+        let all = flattenTree(wins)
 
         var group: Bool?  // true = 电脑组
         var pendingIcon = false
@@ -108,22 +144,37 @@ enum UUReader {
         return result.enumerated().sorted { (ys[$0.element.name] ?? 0, $0.offset) < (ys[$1.element.name] ?? 0, $1.offset) }.map(\.element)
     }
 
-    /// 读取「本机被控中」表格里的控制端设备名。主窗口不存在返回 nil，无人控制返回 []
+    private static func cleanControllerName(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.hasPrefix("(selected)") {
+            s = String(s.dropFirst("(selected)".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return s
+    }
+
+    /// 读取「本机被控中」表格里的控制端设备名。主窗口不存在或遍历不完整返回 nil，无人控制返回 []
     static func readControllers() -> [String]? {
         let wins = windows()
         guard !wins.isEmpty else { return nil }
-        var all: [AXUIElement] = []
-        wins.forEach { flatten($0, into: &all) }
+        let all = flattenTree(wins)
         var names: [String] = []
         for row in all where role(row) == kAXRowRole {
-            var inner: [AXUIElement] = []
-            flatten(row, into: &inner)
+            let inner = flattenTree([row])
             let texts = inner.filter { role($0) == kAXStaticTextRole }.compactMap { value($0) }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             // 只接受带「远程控制」标记的行，避免其他表格误触发连入。
             guard texts.contains("远程控制") else { continue }
-            if let n = texts.first(where: { $0 != "远程控制" && !$0.hasPrefix("连接时长") && !$0.isEmpty }),
-               !names.contains(n) {
-                names.append(n)
+            if let rawName = texts.first(where: { $0 != "远程控制" && !$0.hasPrefix("连接时长") && !$0.isEmpty }) {
+                let n = cleanControllerName(rawName)
+                if !n.isEmpty, !names.contains(n) {
+                    names.append(n)
+                }
+            }
+        }
+        if names.isEmpty {
+            let hasReadableText = all.contains { role($0) == kAXStaticTextRole }
+            if !hasReadableText || all.count >= maxFlattenNodes {
+                return nil
             }
         }
         return names

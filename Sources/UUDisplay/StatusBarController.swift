@@ -1,16 +1,19 @@
-// 菜单栏：状态 / 远程时只保留虚拟屏 / 设置 / 完全退出
-import AboutKit
+// 菜单栏：状态 / 横竖屏互换 / 自动准备虚拟屏 / 远程时只保留虚拟屏 / 恢复 / 诊断 / 设置 / 完全退出
 import AppKit
 
 final class StatusBarController: NSObject, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let coordinator: Coordinator
     private let openSettings: (SettingsPane?) -> Void
+    private let openDiagnostics: () -> Void
     private let store = ConfigStore.shared
 
-    init(coordinator: Coordinator, openSettings: @escaping (SettingsPane?) -> Void) {
+    init(coordinator: Coordinator,
+         openSettings: @escaping (SettingsPane?) -> Void,
+         openDiagnostics: @escaping () -> Void = {}) {
         self.coordinator = coordinator
         self.openSettings = openSettings
+        self.openDiagnostics = openDiagnostics
         super.init()
         let menu = NSMenu()
         menu.delegate = self
@@ -19,8 +22,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         refresh()
     }
 
-    /// 菜单栏图标：Assets/AppIcon/MenuBarIconTemplate（模板图，深色菜单栏自动反白）；
-    /// 非 .app 运行（调试）找不到资源时退回系统图标
     private static let menuBarIcon: NSImage = {
         if let image = NSImage(named: "MenuBarIconTemplate") {
             image.isTemplate = true
@@ -45,13 +46,28 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(status)
         menu.addItem(.separator())
 
+        if coordinator.canSwapOrientation {
+            menu.addItem(action("横竖屏互换", #selector(swapOrientation)))
+        }
+
+        let autoVirtual = action("自动准备虚拟屏", #selector(toggleAutoVirtual))
+        autoVirtual.state = store.config.paused ? .off : .on
+        menu.addItem(autoVirtual)
+
         let physical = action("远程时只保留虚拟屏", #selector(toggleDisablePhysical))
         physical.state = store.config.shouldDisablePhysical ? .on : .off
         menu.addItem(physical)
+
+        if coordinator.needsRecovery {
+            menu.addItem(.separator())
+            menu.addItem(action("⚠️ 立即恢复所有屏幕 (⌃⌥⌘9)", #selector(restorePhysicalNow)))
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(action("诊断与日志…", #selector(openDiagnosticsPanel)))
         menu.addItem(action("设置…", #selector(reconfigure), key: ","))
         menu.addItem(.separator())
         menu.addItem(action("完全退出", #selector(quit), key: "q"))
-        DebugLabels.decorate(menu)
     }
 
     private func action(_ title: String, _ sel: Selector, key: String = "") -> NSMenuItem {
@@ -60,11 +76,18 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         return it
     }
 
-    @objc private func reconfigure() { openSettings(nil) }
+    @objc private func swapOrientation() { coordinator.swapOrientation() }
+
+    @objc private func toggleAutoVirtual() { coordinator.setPaused(!store.config.paused) }
 
     @objc private func toggleDisablePhysical() { coordinator.setDisablePhysical(!store.config.shouldDisablePhysical) }
 
-    /// 与设置窗口的「完全退出」一致：停掉本次登录中的守护助手，再退出主程序
+    @objc private func restorePhysicalNow() { coordinator.restorePhysical() }
+
+    @objc private func openDiagnosticsPanel() { openDiagnostics() }
+
+    @objc private func reconfigure() { openSettings(nil) }
+
     @objc private func quit() {
         WatchdogAgent.stopForSession()
         NSApp.terminate(nil)

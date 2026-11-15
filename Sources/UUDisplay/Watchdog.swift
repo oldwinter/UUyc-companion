@@ -8,15 +8,18 @@ enum Heartbeat {
     static let appURL = ConfigStore.dir.appendingPathComponent("heartbeat-app")
     static let watchdogURL = ConfigStore.dir.appendingPathComponent("heartbeat-watchdog")
 
-    static func beat(_ url: URL) {
-        try? "\(getpid())".write(to: url, atomically: true, encoding: .utf8)
+    static func beat(_ url: URL, connected: Bool = false) {
+        try? "\(getpid()):\(connected ? 1 : 0)".write(to: url, atomically: true, encoding: .utf8)
     }
 
-    /// (pid, 距上次心跳秒数)
-    static func read(_ url: URL) -> (pid: pid_t, age: TimeInterval)? {
-        guard let s = try? String(contentsOf: url, encoding: .utf8), let pid = pid_t(s.trimmingCharacters(in: .whitespacesAndNewlines)),
+    /// (pid, 是否连接, 距上次心跳秒数)
+    static func read(_ url: URL) -> (pid: pid_t, connected: Bool, age: TimeInterval)? {
+        guard let s = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let parts = s.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ":", maxSplits: 1)
+        guard let pidPart = parts.first, let pid = pid_t(pidPart),
               let m = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date else { return nil }
-        return (pid, Date().timeIntervalSince(m))
+        let connected = parts.count > 1 ? (parts[1] == "1") : false
+        return (pid, connected, Date().timeIntervalSince(m))
     }
 
     static func alive(_ url: URL, maxAge: TimeInterval) -> Bool {
@@ -50,8 +53,8 @@ enum Watchdog {
                 let hb = Heartbeat.read(Heartbeat.appURL)
                 let appExists = hb.map { kill($0.pid, 0) == 0 } ?? false
                 let appHealthy = appExists && (hb?.age ?? .infinity) < appMaxAge
-                // 测试开关：假定 UU 一直连着，用于单独验证心跳超时
-                let uu = assumeUU || UUMonitor.overlayPresent()
+                // 测试开关 / 覆盖窗口 / UURemoteServer 防息屏断言 / 主程序活跃连接标记
+                let uu = assumeUU || UUMonitor.overlayPresent() || UUPowerAssertion.uuServerHasDisplayAssertion() || (appHealthy && (hb?.connected ?? false))
                 uuGoneSince = uu ? nil : (uuGoneSince ?? Date())
 
                 if !appHealthy {

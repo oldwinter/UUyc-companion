@@ -24,6 +24,7 @@ final class SettingsModel: ObservableObject {
     @Published var physicalOff = PhysicalDisplays.pending != nil
     @Published var savedHint = false
     @Published var quickStartShown = false
+    @Published var keepWarmDevice = ""
 
     let devices = WizardModel()
     var onConfigChanged: (() -> Void)?
@@ -31,6 +32,7 @@ final class SettingsModel: ObservableObject {
     var setPaused: ((Bool) -> Void)?
     var restorePhysical: (() -> Void)?
     var openPermissions: (() -> Void)?
+    var openDiagnostics: (() -> Void)?
     var openTour: (() -> Void)?
     private var timer: Timer?
     private let store = ConfigStore.shared
@@ -39,7 +41,19 @@ final class SettingsModel: ObservableObject {
         autoVirtual = !store.config.paused
         disablePhysical = store.config.shouldDisablePhysical
         watchdogEnabled = store.config.shouldRunWatchdog
+        keepWarmDevice = store.config.keepWarmDevice ?? ""
         devices.onSaved = { [weak self] in self?.devicesSaved() }
+    }
+
+    var keepWarmCandidates: [DeviceConfig] {
+        devices.rows.filter { $0.kind != .computer && $0.hasSize }
+    }
+
+    func setKeepWarmDevice(_ name: String) {
+        keepWarmDevice = name
+        store.config.keepWarmDevice = name.isEmpty ? nil : name
+        Log.info("设置：空闲时保持虚拟屏就绪 → \(name.isEmpty ? "关" : name)")
+        onConfigChanged?()
     }
 
     var fallbackAvailable: Bool { autoVirtual && disablePhysical }
@@ -305,6 +319,31 @@ struct ControlledPanel: View {
             if !model.autoVirtual {
                 Text("要先打开「自动准备虚拟屏」。").font(.caption).foregroundStyle(.secondary)
             }
+            Divider()
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("空闲时保持虚拟屏就绪（防切屏丢声）")
+                        .font(.headline)
+                        .foregroundStyle(model.autoVirtual ? .primary : .secondary)
+                    Text("未在远控时保留一块虚拟屏，避免无显示器 Mac mini 切屏瞬间桌面乱飞或音频输出丢失；待机期间不会关闭物理屏。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 12)
+                Picker("", selection: Binding(
+                    get: { model.keepWarmDevice },
+                    set: { model.setKeepWarmDevice($0) }
+                )) {
+                    Text("关闭").tag("")
+                    ForEach(model.keepWarmCandidates, id: \.name) { dev in
+                        Text("\(dev.name) (\(dev.sizeLabel))").tag(dev.name)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 210)
+                .disabled(!model.autoVirtual || model.keepWarmCandidates.isEmpty)
+            }
         }
         .padding(24)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -462,13 +501,14 @@ struct SettingsView: View {
             Divider()
 
             // 中：常用操作
-            HStack(spacing: 14) {
+            HStack(spacing: 12) {
                 Button { model.restorePhysical?() } label: {
                     Label("立即恢复所有屏幕", systemImage: "display.2")
                 }
                 .disabled(!model.physicalOff)
                 .help(model.physicalOff ? "也可以按 ⌃ control + ⌥ option + ⌘ command + 9" : "现在没有熄灭的屏幕")
                 Button { model.openPermissions?() } label: { Label("权限设置", systemImage: "hand.raised") }
+                Button { model.openDiagnostics?() } label: { Label("诊断", systemImage: "stethoscope") }
                 Button { model.openTour?() } label: { Label("功能介绍", systemImage: "sparkles") }
                 Button { model.quickStartShown.toggle() } label: { Label("快速上手", systemImage: "list.number") }
                     .popover(isPresented: $model.quickStartShown, arrowEdge: .bottom) { QuickStartView() }
@@ -488,7 +528,7 @@ struct SettingsView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
         }
-        .frame(width: 900)
+        .frame(width: 820)
         .clipped()
     }
 }
@@ -500,6 +540,7 @@ final class SettingsWindowController {
     var currentModel: SettingsModel? { model }
     var currentWindow: NSWindow? { window }
     var openPermissions: (() -> Void)?
+    var openDiagnostics: (() -> Void)?
     var openTour: (() -> Void)?
     var onConfigChanged: (() -> Void)?
     var setDisablePhysical: ((Bool) -> Void)?
@@ -521,6 +562,7 @@ final class SettingsWindowController {
         model.setPaused = setPaused
         model.restorePhysical = restorePhysical
         model.openPermissions = openPermissions
+        model.openDiagnostics = openDiagnostics
         model.openTour = openTour
         model.start()
         self.model = model

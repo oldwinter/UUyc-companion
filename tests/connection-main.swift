@@ -27,6 +27,16 @@ import Foundation
    precondition(idle.update(overlay: false, controllers: [], now: t.addingTimeInterval(Double(i))) == nil)
   }
   precondition(idle.update(overlay: true, controllers: [], now: t.addingTimeInterval(1000)) == .connected)
-  print("PASS: Android without overlay, unchanged session, debounce, delayed name, device switch, disconnect")
+  precondition(idle.controller == nil)
+
+  // 慢 AX 缓存兜底：中间瞬时 nil 只要不超过 1.5s 不应触发断开抖动。
+  var stable = UUConnectionState()
+  precondition(stable.update(overlay: false, controllers: ["vivo X Fold6"], now: t) == .connected)
+  precondition(stable.controller == "vivo X Fold6")
+  precondition(stable.update(overlay: false, controllers: nil, now: t.addingTimeInterval(1.2)) == nil)
+  precondition(stable.update(overlay: false, controllers: ["vivo X Fold6"], now: t.addingTimeInterval(1.6)) == nil)
+  precondition(stable.connected)
+  precondition(stable.controller == "vivo X Fold6")
+  print("PASS: Android without overlay, unchanged session, debounce, delayed name, device switch, disconnect, no-flap")
  }
 }

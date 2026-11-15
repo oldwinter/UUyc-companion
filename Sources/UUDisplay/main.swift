@@ -8,11 +8,17 @@
 //      UUDisplay --tour                        只展示功能导览
 //      UUDisplay --open-settings [面板]          启动后直接打开设置窗口
 //      UUDisplay --render-about <png>            渲染「关于」窗口
+//      UUDisplay --diagnose                    输出诊断报告并退出
 import AppKit
 import Carbon.HIToolbox
 import PermissionFlow
 import ServiceManagement
 import SwiftUI
+
+if CommandLine.arguments.contains("--diagnose") {
+    print(Diagnostics.generateReport())
+    exit(0)
+}
 
 if CommandLine.arguments.contains("--watchdog") { Watchdog.run() }
 
@@ -32,6 +38,7 @@ if CommandLine.arguments.contains("--dump-devices") {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let coordinator = Coordinator()
     let settings = SettingsWindowController()
+    let diagnostics = DiagnosticsWindowController()
     let permissions = PermissionsWindowController()
     let tour = TourController()
     var statusBar: StatusBarController?
@@ -42,9 +49,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         Log.info("启动 UUDisplay，辅助功能权限：\(UUReader.isTrusted)")
+        diagnostics.onClearMarkers = { [weak self] in self?.coordinator.clearResidualRecovery() }
         statusBar = StatusBarController(coordinator: coordinator,
-                                        openSettings: { [weak self] in self?.settings.show(pane: $0) })
+                                        openSettings: { [weak self] in self?.settings.show(pane: $0) },
+                                        openDiagnostics: { [weak self] in self?.diagnostics.show() })
         settings.openPermissions = { [weak self] in self?.permissions.show() }
+        settings.openDiagnostics = { [weak self] in self?.diagnostics.show() }
         settings.onConfigChanged = { [weak self] in self?.coordinator.configChanged() }
         settings.setDisablePhysical = { [weak self] in self?.coordinator.setDisablePhysical($0) }
         settings.setPaused = { [weak self] in self?.coordinator.setPaused($0) }
@@ -53,9 +63,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         coordinator.onChange = { [weak self] in self?.statusBar?.refresh() }
         AboutPage.setUpDebugLabels()
 
-        // 心跳：看门狗据此判断主程序是否卡死（主线程定时器，卡住即停跳）
-        Heartbeat.beat(Heartbeat.appURL)
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in Heartbeat.beat(Heartbeat.appURL) }
+        // 心跳：看门狗据此判断主程序是否卡死及当前是否处于连接态（主线程定时器，卡住即停跳）
+        Heartbeat.beat(Heartbeat.appURL, connected: coordinator.connected)
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                Heartbeat.beat(Heartbeat.appURL, connected: self?.coordinator.connected ?? false)
+            }
+        }
         installHotkey()
 
         let args = CommandLine.arguments

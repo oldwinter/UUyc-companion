@@ -15,3 +15,6 @@ swiftc Sources/UUDisplay/PhysicalDisplays.swift Sources/UUDisplay/Log.swift Sour
 
 swiftc Sources/UUDisplay/Config.swift tests/config-main.swift -o "$TEST_DIR/config-tests"
 "$TEST_DIR/config-tests"
+
+swiftc Sources/UUDisplay/UUReader.swift tests/reader-main.swift -o "$TEST_DIR/reader-tests"
+"$TEST_DIR/reader-tests"

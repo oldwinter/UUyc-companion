@@ -43,33 +43,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let tour = TourController()
     var statusBar: StatusBarController?
     private var heartbeatTimer: Timer?
+    private var lastHeartbeatConnected: Bool?
     private var hotKeyRef: EventHotKeyRef?
     private var demoController: PermissionFlowController?
     private var terminating = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
         Log.info("启动 UUDisplay，辅助功能权限：\(UUReader.isTrusted)")
+        installMainMenu()
         diagnostics.onClearMarkers = { [weak self] in self?.coordinator.clearResidualRecovery() }
         statusBar = StatusBarController(coordinator: coordinator,
                                         openSettings: { [weak self] in self?.settings.show(pane: $0) },
-                                        openDiagnostics: { [weak self] in self?.diagnostics.show() })
+                                        openDiagnostics: { [weak self] in self?.diagnostics.show() },
+                                        openPermissions: { [weak self] in self?.permissions.show() })
         settings.openPermissions = { [weak self] in self?.permissions.show() }
         settings.openDiagnostics = { [weak self] in self?.diagnostics.show() }
         settings.onConfigChanged = { [weak self] in self?.coordinator.configChanged() }
+        settings.onPaneChanged = { [weak self] in self?.coordinator.lastOpenedSettingsPane = $0 }
+        settings.onWatchdogEnabled = { [weak self] in self?.beatHeartbeatIfNeeded(force: true) }
         settings.setDisablePhysical = { [weak self] in self?.coordinator.setDisablePhysical($0) }
         settings.setPaused = { [weak self] in self?.coordinator.setPaused($0) }
         settings.restorePhysical = { [weak self] in self?.coordinator.restorePhysical() }
         settings.openTour = { [weak self] in self?.tour.show() }
-        coordinator.onChange = { [weak self] in self?.statusBar?.refresh() }
-        AboutPage.setUpDebugLabels()
-
-        // 心跳：看门狗据此判断主程序是否卡死及当前是否处于连接态（主线程定时器，卡住即停跳）
-        Heartbeat.beat(Heartbeat.appURL, connected: coordinator.connected)
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                Heartbeat.beat(Heartbeat.appURL, connected: self?.coordinator.connected ?? false)
+        coordinator.onChange = { [weak self] in
+            guard let self else { return }
+            self.statusBar?.refresh()
+            let nowConnected = self.coordinator.connected
+            if self.lastHeartbeatConnected != nowConnected {
+                self.lastHeartbeatConnected = nowConnected
+                self.beatHeartbeatIfNeeded()
             }
         }
+        AboutPage.setUpDebugLabels()
+
+        // 按需心跳：仅当开启看门狗或存在待恢复物理屏记录时写盘（3 秒间隔 + 连接变化立即补发），日常零无效写盘
+        lastHeartbeatConnected = coordinator.connected
+        beatHeartbeatIfNeeded()
+        let hbTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.beatHeartbeatIfNeeded()
+            }
+        }
+        hbTimer.tolerance = 0.5
+        heartbeatTimer = hbTimer
         installHotkey()
 
         let args = CommandLine.arguments
@@ -195,6 +211,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func beatHeartbeatIfNeeded(force: Bool = false) {
+        guard force || ConfigStore.shared.config.shouldRunWatchdog || PhysicalDisplays.pending != nil else { return }
+        Heartbeat.beat(Heartbeat.appURL, connected: coordinator.connected)
+    }
+
+    /// 为 LSUIElement 应用补充标准主菜单，保证输入框/日志窗口的 ⌘C/⌘V/⌘X/⌘A/⌘Z 与 ⌘W/⌘, 快捷键可用
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        let about = NSMenuItem(title: "关于 UU远程伴侣", action: #selector(menuShowAbout), keyEquivalent: "")
+        about.target = self
+        appMenu.addItem(about)
+        appMenu.addItem(.separator())
+        let prefs = NSMenuItem(title: "设置…", action: #selector(menuOpenSettings), keyEquivalent: ",")
+        prefs.target = self
+        appMenu.addItem(prefs)
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "隐藏 UU远程伴侣", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let quit = NSMenuItem(title: "完全退出", action: #selector(menuQuitCompletely), keyEquivalent: "q")
+        quit.target = self
+        appMenu.addItem(quit)
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenu.addItem(withTitle: "关闭", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func menuShowAbout() { AboutPage.show() }
+    @objc private func menuOpenSettings() { settings.show(pane: coordinator.preferredSettingsPane) }
+    @objc private func menuQuitCompletely() {
+        WatchdogAgent.stopForSession()
+        NSApp.terminate(nil)
+    }
+
     /// 全局快捷键 ⌃⌥⌘9：立即恢复物理屏（Carbon 热键，无需任何权限）
     private func installHotkey() {
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -290,6 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 压测：随机连入/换设备/断开，间隔 0.3–6 秒，制造上一轮未收尾就进入下一轮的情况
     private func stress(rounds: Int) {
         coordinator.display.shouldDisablePhysical = { [weak self] in self?.coordinator.physicalDisableAllowed ?? false }
+        coordinator.display.isRemoteSessionActive = { [weak self] in self?.coordinator.connected ?? false }
         coordinator.display.recoverIfNeeded()
         let devices = ["iPad Air", "OPPO Pad 3 Pro", "iPhone 17", "OPPO Reno13 Pro", "M1"]
         // UUDISPLAY_STRESS_SLOW=1：每段停留 2.5–5 秒，确保走到关闭物理屏
@@ -328,6 +401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func simulate(name: String, seconds: Double) {
         coordinator.display.shouldDisablePhysical = { [weak self] in self?.coordinator.physicalDisableAllowed ?? false }
+        coordinator.display.isRemoteSessionActive = { [weak self] in self?.coordinator.connected ?? false }
         coordinator.display.recoverIfNeeded()
         // "A>B"：先按 A 连入，3 秒后识别为 B（模拟名称延迟出现导致的重建）
         let names = name.components(separatedBy: ">")

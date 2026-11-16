@@ -3,7 +3,7 @@
 import AppKit
 
 final class Coordinator {
-    let monitor = UUMonitor()
+    let monitor = UUMonitor(isUURunning: { UUReader.app != nil })
     let display = DisplayManager()
     private let store = ConfigStore.shared
 
@@ -11,6 +11,9 @@ final class Coordinator {
     var onChange: (() -> Void)?
 
     private(set) var controllerName: String?
+    /// 当前远控会话（或手动预览）内用户通过菜单栏手动指定的虚拟屏规格，优先于自动识别
+    private(set) var manualOverride: DeviceConfig?
+    var lastOpenedSettingsPane: SettingsPane?
     private var openedUUWindow = false
     private var openingUUWindow = false
     private var swappedOrientation = false
@@ -23,10 +26,12 @@ final class Coordinator {
 
     func start() {
         display.shouldDisablePhysical = { [weak self] in self?.physicalDisableAllowed ?? false }
+        display.isRemoteSessionActive = { [weak self] in self?.connected ?? false }
         display.recoverIfNeeded()
         monitor.onConnect = { [weak self] in self?.handleConnect() }
         monitor.onDisconnect = { [weak self] in self?.handleDisconnect() }
         monitor.onControllersUpdate = { [weak self] controllers in self?.handleControllersUpdate(controllers) }
+        monitor.onTrustChange = { [weak self] _ in self?.onChange?() }
         monitor.start()
         applyKeepWarmIfIdle()
     }
@@ -41,13 +46,78 @@ final class Coordinator {
         return current.width != current.height
     }
 
+    var swappedSizeText: String? {
+        guard canSwapOrientation, let current = display.current else { return nil }
+        var flipped = current
+        flipped.width = current.height
+        flipped.height = current.width
+        let ep = flipped.effectivePixels
+        return "\(ep.width)×\(ep.height)"
+    }
+
     var needsRecovery: Bool {
         display.physicalOff || PhysicalDisplays.pending != nil || display.hasSavedStates || display.wedged
+    }
+
+    var preferredSettingsPane: SettingsPane? {
+        if !UUReader.isTrusted
+            || !store.isConfigured
+            || store.config.devices.contains(where: { !$0.inComputerGroup && !$0.hasSize }) {
+            return .controller
+        }
+        return lastOpenedSettingsPane
+    }
+
+    var statusSummary: (primary: String, secondary: String?) {
+        if display.wedged {
+            return ("⛔️ 屏幕设置无响应，请重启 Mac", "可在设置或诊断中尝试恢复，或直接重启")
+        }
+        if store.config.paused {
+            return ("虚拟屏已暂停", "连接时不做屏幕调整")
+        }
+        if !UUReader.isTrusted && simulatedName == nil {
+            if connected {
+                if let c = display.current, display.isActive, manualOverride != nil {
+                    return ("远控已连接 · 手动虚拟屏 \(c.sizeLabel)", "缺少辅助功能权限，可授予权限以恢复自动识别")
+                }
+                return ("⚠️ 远控已连接 · 缺少辅助功能权限", "无法自动识别设备，请授权或在下方手动切屏")
+            }
+            if let c = display.current, display.isActive {
+                return ("⚠️ 缺少辅助功能权限", "待机虚拟屏 \(c.sizeLabel) · 暂无法自动识别设备")
+            }
+            return ("⚠️ 缺少辅助功能权限", "暂无法自动识别控制端设备")
+        }
+        if !connected {
+            if let c = display.current, display.isActive {
+                if manualOverride != nil {
+                    return ("手动虚拟屏 \(c.sizeLabel)", c.detailSummary)
+                }
+                return ("待机就绪 · 虚拟屏已预备 \(c.sizeLabel)", c.detailSummary)
+            }
+            return ("等待其它设备连接中", nil)
+        }
+        let who = controllerName ?? "未知设备"
+        if let c = display.current, display.isActive {
+            let mode = manualOverride != nil ? "手动指定" : "虚拟屏已匹配"
+            let detail = display.physicalOff ? "\(c.detailSummary) · 物理屏已软关闭" : c.detailSummary
+            return ("\(who) 已连接 · \(mode) \(c.sizeLabel)", detail)
+        }
+        let reason = controllerName == nil ? "正在或未能读取控制端设备名" : "该设备已设为「不指定分辨率」"
+        return ("\(who) 已连接 · 虚拟屏没有调整", reason)
     }
 
     var statusText: String {
         if display.wedged { return "⛔️ 屏幕设置无响应，请重启 Mac" }
         if store.config.paused { return "虚拟屏已暂停：连接时不做调整" }
+        if !UUReader.isTrusted && simulatedName == nil {
+            if connected {
+                if let c = display.current, display.isActive, manualOverride != nil {
+                    return "远控已连接 · 手动指定 \(c.sizeLabel)（未授辅助功能权限）"
+                }
+                return "⚠️ 远控已连接 · 缺少辅助功能权限，无法自动识别设备"
+            }
+            return "⚠️ 缺少辅助功能权限：暂无法识别控制端设备"
+        }
         if !connected {
             if let c = display.current, display.isActive {
                 return "待机就绪 · 虚拟屏已预备 \(c.sizeLabel)"
@@ -56,7 +126,8 @@ final class Coordinator {
         }
         let who = controllerName ?? "未知设备"
         if let c = display.current, display.isActive {
-            return "\(who) 已连接 · 虚拟屏已匹配 \(c.sizeLabel)\(display.physicalOff ? " · 物理屏幕已软关闭" : "")"
+            let mode = manualOverride != nil ? "手动指定" : "虚拟屏已匹配"
+            return "\(who) 已连接 · \(mode) \(c.sizeLabel)\(display.physicalOff ? " · 物理屏幕已软关闭" : "")"
         }
         return "\(who) 已连接 · 虚拟屏没有调整"
     }
@@ -69,6 +140,9 @@ final class Coordinator {
             resolve(name)
             return
         }
+        if manualOverride != nil {
+            display.syncSessionState()
+        }
         onChange?()
         guard !store.config.paused else { return }
         openUUWindowOnceIfNeeded()
@@ -76,6 +150,7 @@ final class Coordinator {
 
     func handleDisconnect() {
         controllerName = nil
+        manualOverride = nil
         openedUUWindow = false
         openingUUWindow = false
         swappedOrientation = false
@@ -86,6 +161,8 @@ final class Coordinator {
             }
             if !display.matches(warm) {
                 display.create(warm)
+            } else {
+                display.syncSessionState()
             }
         } else {
             display.remove()
@@ -124,9 +201,14 @@ final class Coordinator {
     private func resolve(_ name: String) {
         guard !store.config.paused else { return }
         if controllerName != name {
-            swappedOrientation = false
+            if manualOverride == nil { swappedOrientation = false }
             controllerName = name
             Log.info("控制端：\(name)")
+        }
+        if manualOverride != nil {
+            display.syncSessionState()
+            onChange?()
+            return
         }
         let cfg: DeviceConfig?
         if let known = store.device(named: name) {
@@ -159,9 +241,7 @@ final class Coordinator {
         }
         let effective = applySwapped(cfg)
         if display.matches(effective) {
-            if physicalDisableAllowed && !display.physicalOff {
-                display.disablePhysicalIfNeeded()
-            }
+            display.syncSessionState()
             return
         }
         display.create(effective)
@@ -181,6 +261,8 @@ final class Coordinator {
             if !display.matches(warm) {
                 Log.info("待机预热虚拟屏：\(warm.name) (\(warm.sizeLabel))")
                 display.create(warm)
+            } else {
+                display.syncSessionState()
             }
         } else if display.isActive {
             display.remove()
@@ -193,6 +275,7 @@ final class Coordinator {
     func setPaused(_ paused: Bool) {
         store.config.paused = paused
         if paused {
+            manualOverride = nil
             display.remove()
         } else if connected {
             handleConnect()
@@ -202,9 +285,40 @@ final class Coordinator {
         onChange?()
     }
 
+    /// 菜单栏手动切换虚拟屏规格（当前会话生效；传入 nil 则恢复自动按设备匹配）
+    func applyManualOverride(_ cfg: DeviceConfig?) {
+        swappedOrientation = false
+        if let cfg {
+            manualOverride = cfg
+            Log.info("手动切换虚拟屏规格：\(cfg.name) (\(cfg.sizeLabel))")
+            display.create(cfg)
+            onChange?()
+            return
+        }
+        manualOverride = nil
+        Log.info("恢复自动按设备匹配虚拟屏")
+        if connected && !store.config.paused {
+            if let name = simulatedName ?? controllerName ?? monitor.currentController {
+                resolve(name)
+            } else {
+                display.remove()
+                onChange?()
+            }
+        } else if !connected && !store.config.paused {
+            applyKeepWarmIfIdle()
+        } else {
+            display.remove()
+            onChange?()
+        }
+    }
+
     /// 配置变更后，若正在被控则按新配置重新应用；否则刷新待机保活
     func configChanged() {
         swappedOrientation = false
+        if manualOverride != nil {
+            onChange?()
+            return
+        }
         if connected, !store.config.paused {
             if let name = simulatedName ?? controllerName ?? monitor.currentController {
                 resolve(name)
@@ -224,6 +338,7 @@ final class Coordinator {
         var flipped = current
         flipped.width = current.height
         flipped.height = current.width
+        if manualOverride != nil { manualOverride = flipped }
         Log.info("横竖屏互换：\(current.sizeLabel) → \(flipped.sizeLabel)")
         display.create(flipped)
         onChange?()

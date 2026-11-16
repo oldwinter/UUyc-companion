@@ -50,6 +50,32 @@ import Foundation
         precondition(s1 == s2 && s1 != 0 && s1 != UInt32.max)
         precondition(s1 != s3 && s1 != s4 && s1 != s5)
 
-        print("PASS: Config effectivePixels, presets/typos, per-row merge save, stable FNV-1a serial")
+        // 5. 逻辑像素摘要、方向文案、折叠屏多形态变体与新增误输/预设匹配
+        precondition(evenHiDPI.logicalSize == (1156, 1252))
+        precondition(evenHiDPI.orientationLabel == "竖屏")
+        precondition(evenHiDPI.detailSummary == "逻辑 1156×1252 pt · 竖屏")
+
+        let landscapeDev = DeviceConfig(name: "iPad Air", kind: .tablet, width: 2360, height: 1640, hiDPI: true)
+        precondition(landscapeDev.logicalSize == (1180, 820))
+        precondition(landscapeDev.orientationLabel == "横屏")
+
+        let squareDev = DeviceConfig(name: "Square", kind: .tablet, width: 2000, height: 2000, hiDPI: false)
+        precondition(squareDev.logicalSize == (2000, 2000))
+        precondition(squareDev.orientationLabel == "方屏")
+
+        let foldVariants = Presets.variants(for: "vivo X Fold6")
+        precondition(foldVariants.count == 4, "vivo X Fold6 应提供内外横竖 4 种预设形态")
+        precondition(foldVariants.contains { $0.width == 1080 && $0.height == 2520 })
+        precondition(Presets.variants(for: "OPPO Find N5").count == 2)
+
+        let typo3 = Presets.typoSuggestion(width: 2560, height: 1660)
+        precondition(typo3?.width == 2560 && typo3?.height == 1664)
+        let typo4 = Presets.typoSuggestion(width: 1920, height: 1280)
+        precondition(typo4?.width == 1920 && typo4?.height == 1200)
+        precondition(Presets.suggestedPreset(for: "MacBook Pro 16")?.width == 3456)
+        precondition(Presets.suggestedPreset(for: "home win11")?.width == 1920)
+        precondition(Presets.suggestedPreset(for: "Xiaomi Pad 7")?.width == 3200)
+
+        print("PASS: Config effectivePixels, presets/typos, per-row merge save, stable FNV-1a serial, variants & detailSummary")
     }
 }

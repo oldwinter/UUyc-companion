@@ -39,6 +39,7 @@ enum Presets {
         ResolutionPreset(category: "折叠屏", title: "vivo X Fold6 内屏（竖）", width: 2312, height: 2504, hiDPI: true),
         ResolutionPreset(category: "折叠屏", title: "vivo X Fold6 内屏（横）", width: 2504, height: 2312, hiDPI: true),
         ResolutionPreset(category: "折叠屏", title: "vivo X Fold6 外屏（横）", width: 2520, height: 1080, hiDPI: true),
+        ResolutionPreset(category: "折叠屏", title: "vivo X Fold6 外屏（竖）", width: 1080, height: 2520, hiDPI: true),
         ResolutionPreset(category: "折叠屏", title: "OPPO Find N5 / N3 内屏（横）", width: 2480, height: 2248, hiDPI: true),
         ResolutionPreset(category: "折叠屏", title: "华为 Mate X5 / X6 内屏（横）", width: 2496, height: 2224, hiDPI: true),
         ResolutionPreset(category: "折叠屏", title: "华为 Pura X 内屏（横）", width: 2120, height: 1320, hiDPI: true),
@@ -50,6 +51,7 @@ enum Presets {
         ResolutionPreset(category: "平板", title: "iPad Pro 13\" (M4)", width: 2752, height: 2064, hiDPI: true),
         ResolutionPreset(category: "平板", title: "iPad mini", width: 2266, height: 1488, hiDPI: true),
         ResolutionPreset(category: "平板", title: "OPPO Pad 3 Pro", width: 3000, height: 2120, hiDPI: true),
+        ResolutionPreset(category: "平板", title: "小米平板 / Android 平板 3:2", width: 3200, height: 2136, hiDPI: true),
         // 手机
         ResolutionPreset(category: "手机", title: "iPhone 17 / 16 Pro（横）", width: 2622, height: 1206, hiDPI: true),
         ResolutionPreset(category: "手机", title: "iPhone 17 / 16 Pro Max（横）", width: 2868, height: 1320, hiDPI: true),
@@ -59,6 +61,7 @@ enum Presets {
         ResolutionPreset(category: "桌面", title: "2K 桌面 (16:9)", width: 2560, height: 1440, hiDPI: false),
         ResolutionPreset(category: "桌面", title: "MacBook Air 13\"", width: 2560, height: 1664, hiDPI: true),
         ResolutionPreset(category: "桌面", title: "MacBook Pro 14\"", width: 3024, height: 1964, hiDPI: true),
+        ResolutionPreset(category: "桌面", title: "MacBook Pro 16\"", width: 3456, height: 2234, hiDPI: true),
         ResolutionPreset(category: "桌面", title: "带鱼屏 21:9", width: 3440, height: 1440, hiDPI: false),
         ResolutionPreset(category: "桌面", title: "4K 桌面 (16:9)", width: 3840, height: 2160, hiDPI: true),
     ]
@@ -72,6 +75,10 @@ enum Presets {
         if lower.contains("mate x") { return all.first { $0.title.contains("Mate X5") } }
         if lower.contains("pura x") { return all.first { $0.title.contains("Pura X") } }
         if lower.contains("magic v") { return all.first { $0.title.contains("Magic V3") } }
+        if lower.contains("oppo pad") { return all.first { $0.title.contains("OPPO Pad 3 Pro") } }
+        if lower.contains("xiaomi pad") || lower.contains("mipad") || lower.contains("小米平板") {
+            return all.first { $0.title.contains("小米平板") }
+        }
         if lower.contains("ipad mini") { return all.first { $0.title.contains("iPad mini") } }
         if lower.contains("ipad air 13") { return all.first { $0.title.contains("iPad Air 13") } }
         if lower.contains("ipad pro 13") { return all.first { $0.title.contains("iPad Pro 13") } }
@@ -79,14 +86,74 @@ enum Presets {
         if lower.contains("ipad") { return all.first { $0.title.contains("iPad Air 11") } }
         if lower.contains("pro max") { return all.first { $0.title.contains("Pro Max") } }
         if lower.contains("iphone") { return all.first { $0.title.contains("16 Pro（横）") } }
+        if lower.contains("macbook pro 16") || lower.contains("mbp 16") || lower.contains("mbp16") {
+            return all.first { $0.title.contains("MacBook Pro 16\"") }
+        }
+        if lower.contains("macbook pro") || lower.contains("mbp") {
+            return all.first { $0.title.contains("MacBook Pro 14\"") }
+        }
+        if lower.contains("macbook air") || lower.contains("macbook") || lower.contains("mba") {
+            return all.first { $0.title.contains("MacBook Air 13\"") }
+        }
+        if lower.contains("win") || lower.contains("pc") || lower.contains("台式") || lower.contains("desktop") {
+            return all.first { $0.title.contains("1080p 桌面") }
+        }
         return nil
+    }
+
+    /// 为多形态设备（主要是折叠屏）返回同一机型家族的所有可用预设（含自动补充的竖屏变体）
+    static func variants(for deviceName: String) -> [ResolutionPreset] {
+        let lower = deviceName.lowercased()
+        let baseMatches: [ResolutionPreset]
+        if lower.contains("fold6") || lower.contains("x fold") {
+            baseMatches = all.filter { $0.title.contains("vivo X Fold6") }
+            return baseMatches
+        } else if lower.contains("find n") {
+            baseMatches = all.filter { $0.title.contains("Find N") }
+        } else if lower.contains("mate x") {
+            baseMatches = all.filter { $0.title.contains("Mate X") }
+        } else if lower.contains("pura x") {
+            baseMatches = all.filter { $0.title.contains("Pura X") }
+        } else if lower.contains("magic v") {
+            baseMatches = all.filter { $0.title.contains("Magic V") }
+        } else {
+            return []
+        }
+
+        var expanded: [ResolutionPreset] = []
+        for preset in baseMatches {
+            expanded.append(preset)
+            if preset.width != preset.height {
+                let flippedTitle: String
+                if preset.title.contains("（横）") {
+                    flippedTitle = preset.title.replacingOccurrences(of: "（横）", with: "（竖）")
+                } else if preset.title.contains("（竖）") {
+                    flippedTitle = preset.title.replacingOccurrences(of: "（竖）", with: "（横）")
+                } else {
+                    flippedTitle = "\(preset.title)（竖）"
+                }
+                let flipped = ResolutionPreset(
+                    category: preset.category,
+                    title: flippedTitle,
+                    width: preset.height,
+                    height: preset.width,
+                    hiDPI: preset.hiDPI
+                )
+                if !expanded.contains(where: { $0.width == flipped.width && $0.height == flipped.height && $0.hiDPI == flipped.hiDPI }) {
+                    expanded.append(flipped)
+                }
+            }
+        }
+        return expanded
     }
 
     static func typoSuggestion(width: Int, height: Int) -> (width: Int, height: Int)? {
         switch (width, height) {
         case (1980, 1080): return (1920, 1080)
         case (1080, 1980): return (1080, 1920)
+        case (1920, 1280): return (1920, 1200)
         case (2560, 1400): return (2560, 1440)
+        case (2560, 1660): return (2560, 1664)
         case (3840, 2100): return (3840, 2160)
         case (2360, 1600): return (2360, 1640)
         default: return nil
@@ -128,6 +195,24 @@ struct DeviceConfig: Codable, Identifiable, Hashable {
     var sizeLabel: String {
         let ep = effectivePixels
         return "\(ep.width)×\(ep.height)\(hiDPI ? " 高清" : "")"
+    }
+
+    /// 逻辑分辨率（HiDPI 为对齐后物理像素的一半）
+    var logicalSize: (width: Int, height: Int) {
+        let ep = effectivePixels
+        guard hiDPI else { return ep }
+        return (ep.width / 2, ep.height / 2)
+    }
+
+    var orientationLabel: String {
+        let ep = effectivePixels
+        if ep.width == ep.height { return "方屏" }
+        return ep.width > ep.height ? "横屏" : "竖屏"
+    }
+
+    var detailSummary: String {
+        let ls = logicalSize
+        return "逻辑 \(ls.width)×\(ls.height) pt · \(orientationLabel)"
     }
 
     static func make(name: String, kind: DeviceKind) -> DeviceConfig {

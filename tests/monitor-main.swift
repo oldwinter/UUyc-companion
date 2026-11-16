@@ -67,6 +67,69 @@ enum Log { static func info(_ message: String) {} }
         precondition(slowMonitor.currentController == nil, "断开后应清空 currentController")
         slowMonitor.stop()
 
-        print("PASS: blocked AX responsive + stale rejected + 1.6s slow-AX no-flap")
+        // 用例 3：三档自适应节流 + overlay 零等待唤醒 + 稳定会话降频 + 断开防抖 + onTrustChange 回调
+        var adaptiveOverlay = false
+        var adaptiveTrust = true
+        var adaptiveReads = 0
+        var adaptiveControllers: [String]? = []
+        var adaptiveConnects = 0
+        var adaptiveDisconnects = 0
+        var trustEvents: [Bool] = []
+
+        let adaptiveMonitor = UUMonitor(
+            trusted: { adaptiveTrust },
+            readControllers: {
+                lock.lock(); adaptiveReads += 1; let c = adaptiveControllers; lock.unlock()
+                return c
+            },
+            hasOverlay: { adaptiveOverlay }
+        )
+        adaptiveMonitor.onConnect = { adaptiveConnects += 1 }
+        adaptiveMonitor.onDisconnect = { adaptiveDisconnects += 1 }
+        adaptiveMonitor.onTrustChange = { trustEvents.append($0) }
+        adaptiveMonitor.start()
+
+        // 空闲且无 overlay：首拍立即读取 1 次，之后 3.6 秒内不得每秒轮询
+        RunLoop.main.run(until: Date().addingTimeInterval(3.6))
+        lock.lock(); let idleReads = adaptiveReads; lock.unlock()
+        precondition(idleReads <= 2, "空闲时不应每秒刷 AX，实际 idleReads=\(idleReads)")
+        precondition(trustEvents == [true], "启动首拍应回调一次权限状态")
+
+        // overlay 从 false 变为 true：下一拍立即唤醒 AX 读取，无需等待 5 秒空闲间隔
+        lock.lock()
+        adaptiveOverlay = true
+        adaptiveControllers = ["iPad Air"]
+        adaptiveReads = 0
+        lock.unlock()
+        RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+        lock.lock(); let wakeReads = adaptiveReads; lock.unlock()
+        precondition(wakeReads >= 1, "overlay 出现后应立即唤醒 AX 读取")
+        precondition(adaptiveMonitor.connected && adaptiveConnects == 2, "overlay 出现并识别控制端应触发连入与控制端就绪事件，实际 adaptiveConnects=\(adaptiveConnects)")
+        precondition(adaptiveMonitor.currentController == "iPad Air", "应立即识别出控制端名称")
+
+        // 稳定已识别的 overlay 会话期间：进入低频档位，接下来 3.5 秒内保持控制端且不再频繁读 AX
+        lock.lock(); adaptiveReads = 0; lock.unlock()
+        RunLoop.main.run(until: Date().addingTimeInterval(3.5))
+        lock.lock(); let stableReads = adaptiveReads; lock.unlock()
+        precondition(stableReads <= 1, "稳定会话期间应降频读 AX，实际 stableReads=\(stableReads)")
+        precondition(adaptiveDisconnects == 0, "稳定会话期间不应断开")
+
+        // overlay 消失后应失效缓存并在 2 秒内干净断开
+        lock.lock()
+        adaptiveOverlay = false
+        adaptiveControllers = []
+        lock.unlock()
+        RunLoop.main.run(until: Date().addingTimeInterval(2.2))
+        precondition(adaptiveDisconnects == 1, "overlay 消失后应在 2 秒内干净断开，实际 disconnects=\(adaptiveDisconnects)")
+
+        // 权限状态翻转回调
+        adaptiveTrust = false
+        RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+        adaptiveTrust = true
+        RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+        precondition(trustEvents == [true, false, true], "权限状态变化应实时回调 onTrustChange，实际 \(trustEvents)")
+        adaptiveMonitor.stop()
+
+        print("PASS: blocked AX responsive + stale rejected + 1.6s slow-AX no-flap + adaptive polling & trust change")
     }
 }

@@ -40,6 +40,8 @@ final class DisplayManager {
     private var shutdownCompletion: (() -> Void)?
     /// 是否应禁用物理屏（由 Coordinator 按连接态、设置决定）
     var shouldDisablePhysical: () -> Bool = { false }
+    /// 当前是否处于活跃远控会话（仅远控期间长期持有防休眠；待机 keepWarm 拓扑收敛后即释放）
+    var isRemoteSessionActive: () -> Bool = { false }
     /// 用户手动恢复后，本次连接内不再禁用
     private var physicalOverride = false
 
@@ -136,6 +138,9 @@ final class DisplayManager {
     }
 
     func disablePhysicalIfNeeded() { kick() }
+
+    /// 远控会话状态变更时同步触发状态机评估（如 keepWarm 转入远控会话需激活防休眠/熄屏检查）
+    func syncSessionState() { kick() }
 
     /// 快捷键 / 菜单 / 关闭开关：立即恢复物理屏，虚拟屏保留
     func restorePhysicalNow(override: Bool = true) {
@@ -345,15 +350,17 @@ final class DisplayManager {
         }
 
         // 目标=某设备的虚拟屏
-        sleepGuard.beginSession()
-
         // 必须在创建虚拟屏之前捕获真实物理屏基线，否则系统可能已联动修改物理屏模式
         if savedStates.isEmpty && vd == nil {
             captureBaseline(from: DisplayManager.onlineDisplays())
         }
 
         if vd == nil || !DisplayManager.same(current, want) {
-            guard !DisplayManager.same(failedCfg, want) else { return }
+            guard !DisplayManager.same(failedCfg, want) else {
+                if !isRemoteSessionActive() { sleepGuard.end() }
+                return
+            }
+            sleepGuard.beginSession()
             busy = true
             if let old = vd { retiring.append(old) }
             vd = nil
@@ -365,6 +372,7 @@ final class DisplayManager {
         }
 
         if !mainSet, let id = vd?.displayID {
+            sleepGuard.beginSession()
             let online = DisplayManager.onlineDisplays()
             guard online.contains(id) else {
                 waitOnlineTries += 1
@@ -391,6 +399,7 @@ final class DisplayManager {
         }
 
         if !retiring.isEmpty {
+            sleepGuard.beginSession()
             guard readyToRelease(retiring) else { busy = true; return finish(settle: 0.5) }
             busy = true
             release(&retiring)
@@ -401,6 +410,7 @@ final class DisplayManager {
         if wantOff, !physicalOff, let id = vd?.displayID {
             let physical = PhysicalDisplays.realPhysicalDisplays(in: DisplayManager.onlineDisplays())
             if !physical.isEmpty {
+                sleepGuard.beginSession()
                 return runCG(settle: 1.5) {
                     let err = PhysicalDisplays.disable(physical)
                     Log.info(err == .success ? "✅ 已关闭物理屏 \(physical)，只保留虚拟屏 #\(id)" : "⚠️ 关闭物理屏失败 CGError=\(err.rawValue)")
@@ -409,7 +419,15 @@ final class DisplayManager {
             }
         }
         if !wantOff, physicalOff {
+            sleepGuard.beginSession()
             return runCG(settle: 1.5) { PhysicalDisplays.restore(reason: "手动恢复") ? .success : .failure }
+        }
+
+        // 所有显示拓扑步骤已收敛：远控中继续持有防休眠；纯待机 keepWarm 立即释放断言让屏幕可正常休眠
+        if isRemoteSessionActive() {
+            sleepGuard.beginSession()
+        } else {
+            sleepGuard.end()
         }
     }
 

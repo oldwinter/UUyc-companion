@@ -22,12 +22,16 @@ final class SettingsModel: ObservableObject {
     @Published var watchdogEnabled: Bool
     @Published var watchdogRunning = Watchdog.isRunning
     @Published var physicalOff = PhysicalDisplays.pending != nil
+    @Published var axGranted = UUReader.isTrusted
+    @Published var hasConflict = false
     @Published var savedHint = false
     @Published var quickStartShown = false
     @Published var keepWarmDevice = ""
 
     let devices = WizardModel()
     var onConfigChanged: (() -> Void)?
+    var onPaneChanged: ((SettingsPane?) -> Void)?
+    var onWatchdogEnabled: (() -> Void)?
     var setDisablePhysical: ((Bool) -> Void)?
     var setPaused: ((Bool) -> Void)?
     var restorePhysical: (() -> Void)?
@@ -58,11 +62,33 @@ final class SettingsModel: ObservableObject {
 
     var fallbackAvailable: Bool { autoVirtual && disablePhysical }
 
-    func start() {
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
+    var headerStatusText: String {
+        if !axGranted { return "未授予辅助功能权限，暂无法自动识别控制端设备" }
+        if !autoVirtual { return "自动准备虚拟屏已暂停" }
+        if physicalOff { return "当前处于仅虚拟屏模式 · 按 ⌃⌥⌘9 可立即恢复所有屏幕" }
+        if !keepWarmDevice.isEmpty { return "待机保活已启用：\(keepWarmDevice)" }
+        return "待机运行中 · 连入设备后将自动匹配虚拟屏"
     }
 
-    func stop() { timer?.invalidate() }
+    func start() {
+        refresh()
+        checkConflictAsync()
+        let t = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in self?.refresh() }
+        t.tolerance = 0.4
+        timer = t
+    }
+
+    func stop() { timer?.invalidate(); timer = nil }
+
+    private func checkConflictAsync() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let conflict = Diagnostics.hasConflictingAdapter()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.hasConflict != conflict else { return }
+                self.hasConflict = conflict
+            }
+        }
+    }
 
     func refresh() {
         let running = Watchdog.isRunning
@@ -71,18 +97,33 @@ final class SettingsModel: ObservableObject {
         if off != physicalOff { physicalOff = off }
         let login = SMAppService.mainApp.status == .enabled
         if login != launchAtLogin { launchAtLogin = login }
+        let ax = UUReader.isTrusted
+        if ax != axGranted {
+            axGranted = ax
+            devices.trusted = ax
+        }
     }
 
     /// 点同一个按钮再次收起；兜底面板只在开启软关闭后可展开
     func toggle(_ pane: SettingsPane) {
         if pane == .fallback && !fallbackAvailable { return }
-        withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
             expanded = expanded == pane ? nil : pane
         }
+        onPaneChanged?(expanded)
     }
 
     /// 设备列表自动保存后：按新配置重新应用，并短暂显示「已自动保存」
     func devicesSaved() {
+        if !keepWarmDevice.isEmpty {
+            let stillValid = store.config.devices.contains {
+                $0.name == keepWarmDevice && $0.kind != .computer && $0.hasSize
+            }
+            if !stillValid {
+                keepWarmDevice = ""
+                store.config.keepWarmDevice = nil
+            }
+        }
         onConfigChanged?()
         savedHint = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.savedHint = false }
@@ -103,14 +144,20 @@ final class SettingsModel: ObservableObject {
         autoVirtual = on
         setPaused?(!on)
         Log.info("设置：自动启动虚拟屏 → \(on ? "开" : "关")")
-        if !fallbackAvailable && expanded == .fallback { withAnimation { expanded = nil } }
+        if !fallbackAvailable && expanded == .fallback {
+            withAnimation { expanded = nil }
+            onPaneChanged?(nil)
+        }
     }
 
     func toggleDisablePhysical(_ on: Bool) {
         disablePhysical = on
         setDisablePhysical?(on)
         Log.info("设置：自动软关闭物理屏 → \(on ? "开" : "关")")
-        if !on && expanded == .fallback { withAnimation { expanded = nil } }
+        if !on && expanded == .fallback {
+            withAnimation { expanded = nil }
+            onPaneChanged?(nil)
+        }
     }
 
     /// 只有在这里开启，看门狗才会安装为 LaunchAgent 并加载；关闭即卸载
@@ -118,7 +165,12 @@ final class SettingsModel: ObservableObject {
         watchdogEnabled = on
         store.config.watchdogEnabled = on
         Log.info("设置：看门狗 → \(on ? "开" : "关")")
-        if on { WatchdogAgent.ensureInstalled() } else { WatchdogAgent.uninstall() }
+        if on {
+            onWatchdogEnabled?()
+            WatchdogAgent.ensureInstalled()
+        } else {
+            WatchdogAgent.uninstall()
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.refresh() }
     }
 
@@ -203,10 +255,11 @@ private struct Card<Content: View>: View {
 /// 虚线箭头，中间带说明文字；纵向对齐到图标中线
 private struct DashedConnector: View {
     let label: String
+    var compact = false
 
     var body: some View {
-        VStack(spacing: 6) {
-            Text(label).font(.caption).foregroundStyle(.secondary)
+        VStack(spacing: compact ? 4 : 6) {
+            Text(label).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             GeometryReader { geo in
                 let w = geo.size.width
                 ZStack {
@@ -225,26 +278,28 @@ private struct DashedConnector: View {
             }
             .frame(height: 10)
         }
-        .padding(.top, 44)  // 文字 + 线大约落在 128 图标的垂直中部
+        .padding(.top, compact ? 10 : 30)
         .frame(minWidth: 70, maxWidth: .infinity)
     }
 }
 
 /// 控制端图标：平板 + 手机 组合
 private struct ControllerIcon: View {
+    var compact = false
+
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             Image(systemName: "ipad.landscape")
                 .resizable().aspectRatio(contentMode: .fit)
-                .frame(width: 112)
-                .offset(x: -8, y: -14)
+                .frame(width: compact ? 44 : 92)
+                .offset(x: compact ? -3 : -6, y: compact ? -5 : -10)
             Image(systemName: "iphone")
                 .resizable().aspectRatio(contentMode: .fit)
-                .frame(height: 64)
-                .padding(4)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .windowBackgroundColor)))
+                .frame(height: compact ? 26 : 52)
+                .padding(compact ? 2 : 4)
+                .background(RoundedRectangle(cornerRadius: compact ? 6 : 10).fill(Color(nsColor: .windowBackgroundColor)))
         }
-        .frame(width: 128, height: 128)
+        .frame(width: compact ? 52 : 108, height: compact ? 42 : 96)
     }
 }
 
@@ -253,17 +308,20 @@ private struct FlowNode<Icon: View>: View {
     let buttonTitle: String
     var enabled = true
     var selected = false
+    var compact = false
     var hint: String? = nil
     let action: () -> Void
     @ViewBuilder var icon: () -> Icon
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: compact ? 5 : 8) {
             icon()
-                .font(.system(size: 96, weight: .light))
+                .font(.system(size: compact ? 34 : 76, weight: .light))
                 .foregroundStyle(enabled ? Color.accentColor : Color.secondary.opacity(0.45))
-                .frame(width: 128, height: 128)
-            Text(caption).font(.subheadline.weight(.medium)).foregroundStyle(enabled ? .primary : .secondary)
+                .frame(width: compact ? 52 : 108, height: compact ? 42 : 96)
+            Text(caption)
+                .font((compact ? Font.caption : Font.subheadline).weight(.medium))
+                .foregroundStyle(enabled ? .primary : .secondary)
             Group {
                 if selected {
                     Button(action: action) { Label(buttonTitle, systemImage: "chevron.up") }
@@ -273,7 +331,7 @@ private struct FlowNode<Icon: View>: View {
                         .buttonStyle(.bordered)
                 }
             }
-            .controlSize(.large)
+            .controlSize(compact ? .regular : .large)
             .disabled(!enabled)
             .help(hint ?? "")
         }
@@ -299,21 +357,21 @@ struct ControlledPanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("被控端设置").font(.title3.bold())
             row("开机启动",
-                "待机时内存占用约60MB。",
+                "待机时轻量常驻，内存占用约 20MB。",
                 isOn: Binding(get: { model.launchAtLogin }, set: { model.toggleLaunchAtLogin($0) }))
             if let err = model.loginError {
                 Text(err).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
             Divider()
             row("自动准备虚拟屏",
-                "远程开始时自动准备名为\"UUyc Companion\"的虚拟屏，供平板或手机使用，须手工选择此屏幕，则可实现远程时上下无黑边且文字清晰；\n远程结束时会自动关闭。",
+                "远程开始时自动准备名为\"UUyc Companion\"的虚拟屏，供平板或手机使用；在 UU远程 选择此屏幕即可获得无黑边的高清画面，远程结束时自动移除。",
                 isOn: Binding(get: { model.autoVirtual }, set: { model.toggleAutoVirtual($0) }))
             Divider()
             row("远程时关闭除虚拟屏之外的所有屏幕",
-                "若不想手工选择虚拟屏，或者想确保远程时所有内容只显示在虚拟屏中，请打开此功能；远程结束时自动恢复。\n若担心恢复失败，可以在「恢复兜底」里打开守护助手。",
+                "若不想手工选择虚拟屏，或希望远程时所有窗口与 Dock 只停留在虚拟屏中，请打开此功能；远程结束时自动恢复。\n若担心恢复失败，可在「恢复兜底」中开启守护助手。",
                 isOn: Binding(get: { model.disablePhysical }, set: { model.toggleDisablePhysical($0) }),
                 enabled: model.autoVirtual)
             if !model.autoVirtual {
@@ -325,7 +383,7 @@ struct ControlledPanel: View {
                     Text("空闲时保持虚拟屏就绪（防切屏丢声）")
                         .font(.headline)
                         .foregroundStyle(model.autoVirtual ? .primary : .secondary)
-                    Text("未在远控时保留一块虚拟屏，避免无显示器 Mac mini 切屏瞬间桌面乱飞或音频输出丢失；待机期间不会关闭物理屏。")
+                    Text("未在远控时保留一块虚拟屏，避免无显示器 Mac mini 切屏瞬间桌面乱飞或音频输出丢失；待机期间不关闭物理屏，且不阻止屏幕休眠。")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -339,13 +397,17 @@ struct ControlledPanel: View {
                     ForEach(model.keepWarmCandidates, id: \.name) { dev in
                         Text("\(dev.name) (\(dev.sizeLabel))").tag(dev.name)
                     }
+                    if !model.keepWarmDevice.isEmpty
+                        && !model.keepWarmCandidates.contains(where: { $0.name == model.keepWarmDevice }) {
+                        Text("\(model.keepWarmDevice)（分辨率待完善）").tag(model.keepWarmDevice)
+                    }
                 }
                 .labelsHidden()
                 .frame(width: 210)
-                .disabled(!model.autoVirtual || model.keepWarmCandidates.isEmpty)
+                .disabled(!model.autoVirtual || (model.keepWarmCandidates.isEmpty && model.keepWarmDevice.isEmpty))
             }
         }
-        .padding(24)
+        .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -417,10 +479,10 @@ struct FallbackPanel: View {
 
 private struct QuickStartView: View {
     private let steps = [
-        "将所有打算用于远程的平板、手机、电脑，都下载并登录同一个UU远程帐号，本软件会自动读取已登录的设备列表。",
-        "咨询AI您设备的物理分辨率，并将分辨率填入列表中。不要除以2，填查到的分辨率就好。",
-        "启用“自动准备虚拟屏”功能，远程时会多一个名为\"UUyc Companion\"的虚拟屏幕，选择它就会实现无黑边的高清的画面。",
-        "若不想手工切，或多显示器下，遇上窗口跑不见，Dock栏到处跑的情况，请打开“远程时关闭除虚拟屏之外的所有屏幕”功能。",
+        "在要用于远程的平板、手机、电脑和本机上登录同一个 UU远程 账号，本软件会自动读取设备列表。",
+        "在「控制端设置」中直接选用内置预设（含手机、折叠屏、iPad、桌面）或手动填入设备物理像素分辨率；点 ⇄ 可随时切换横竖屏。",
+        "开启「自动准备虚拟屏」后，远程连入时将自动生成名为 \"UUyc Companion\" 的高清虚拟屏；也可在菜单栏「切换虚拟屏规格」中临时切屏。",
+        "若不想手动切屏，或希望彻底避免窗口和 Dock 乱跑，可打开「远程时关闭除虚拟屏之外的所有屏幕」（建议搭配守护助手）。",
     ]
 
     var body: some View {
@@ -434,7 +496,7 @@ private struct QuickStartView: View {
             }
         }
         .padding(18)
-        .frame(width: 420)
+        .frame(width: 440)
     }
 }
 
@@ -445,56 +507,97 @@ struct SettingsView: View {
     /// 离屏渲染时展开内容不放进 ScrollView（便于检查完整排版）
     var forRender = false
 
+    private var isExpanded: Bool { model.expanded != nil }
+
     @ViewBuilder private var expandedContent: some View {
         switch model.expanded {
         case .controller:
             WizardView(model: model.devices, openPermissions: model.openPermissions, embedded: true,
                        savedHint: model.savedHint)
-                .frame(height: 500)
+                .frame(height: 450)
         case .controlled:
             ControlledPanel(model: model)
         case .fallback:
             if forRender {
                 FallbackPanel(model: model)
             } else {
-                ScrollView { FallbackPanel(model: model) }.frame(height: 520)
+                ScrollView { FallbackPanel(model: model) }.frame(height: 450)
             }
         case .none:
             EmptyView()
         }
     }
 
+    private var statusBadgeColor: Color {
+        if !model.axGranted { return .orange }
+        if !model.autoVirtual { return .secondary }
+        if model.physicalOff { return .blue }
+        return .green
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            // 顶部实时运行状态条
+            HStack(spacing: 8) {
+                Circle().fill(statusBadgeColor).frame(width: 8, height: 8)
+                Text(model.headerStatusText)
+                    .font(.caption)
+                    .foregroundStyle(model.axGranted ? .secondary : .primary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if !model.axGranted {
+                    Button("去授权") { model.openPermissions?() }
+                        .buttonStyle(.link)
+                        .font(.caption.weight(.medium))
+                }
+                if model.hasConflict {
+                    Button {
+                        model.openDiagnostics?()
+                    } label: {
+                        Label("发现冲突服务 · 查看", systemImage: "exclamationmark.triangle.fill")
+                    }
+                    .buttonStyle(.link)
+                    .foregroundStyle(.orange)
+                    .font(.caption.weight(.medium))
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+            .background(Color.primary.opacity(0.03))
+
+            Divider()
+
             // 上：工作原理图
             HStack(alignment: .top, spacing: 0) {
                 FlowNode(caption: "用于远程的设备", buttonTitle: "控制端设置",
-                         selected: model.expanded == .controller, action: { model.toggle(.controller) }) {
-                    ControllerIcon()
+                         selected: model.expanded == .controller, compact: isExpanded,
+                         action: { model.toggle(.controller) }) {
+                    ControllerIcon(compact: isExpanded)
                 }
-                DashedConnector(label: "使用 UU远程 远程操控")
+                DashedConnector(label: "使用 UU远程 远程操控", compact: isExpanded)
                 FlowNode(caption: "本机", buttonTitle: "设置被控端",
-                         selected: model.expanded == .controlled, action: { model.toggle(.controlled) }) {
+                         selected: model.expanded == .controlled, compact: isExpanded,
+                         action: { model.toggle(.controlled) }) {
                     Image(systemName: "desktopcomputer")
                 }
-                DashedConnector(label: "只保留虚拟屏时")
+                DashedConnector(label: "只保留虚拟屏时", compact: isExpanded)
                 FlowNode(caption: "万一物理屏没恢复", buttonTitle: "恢复兜底",
-                         enabled: model.fallbackAvailable, selected: model.expanded == .fallback,
+                         enabled: model.fallbackAvailable, selected: model.expanded == .fallback, compact: isExpanded,
                          hint: model.fallbackAvailable ? nil : "先在「设置被控端」里打开「远程时关闭除虚拟屏之外的所有屏幕」",
                          action: { model.toggle(.fallback) }) {
                     Image(systemName: "lifepreserver")
                 }
             }
             .padding(.horizontal, 28)
-            .padding(.top, 28)
-            .padding(.bottom, 20)
+            .padding(.top, isExpanded ? 12 : 20)
+            .padding(.bottom, isExpanded ? 10 : 16)
 
             if model.expanded != nil {
                 expandedContent
                     .background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.04)))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
                     .padding(.horizontal, 24)
-                    .padding(.bottom, 16)
+                    .padding(.bottom, 12)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
 
@@ -514,7 +617,7 @@ struct SettingsView: View {
                     .popover(isPresented: $model.quickStartShown, arrowEdge: .bottom) { QuickStartView() }
             }
             .controlSize(.large)
-            .padding(.vertical, 16)
+            .padding(.vertical, 14)
 
             Divider()
 
@@ -526,7 +629,7 @@ struct SettingsView: View {
                     .help("关闭 UU远程伴侣，守护助手也会一起停下（下次打开时恢复）")
             }
             .padding(.horizontal, 20)
-            .padding(.vertical, 14)
+            .padding(.vertical, 12)
         }
         .frame(width: 820)
         .clipped()
@@ -543,14 +646,32 @@ final class SettingsWindowController {
     var openDiagnostics: (() -> Void)?
     var openTour: (() -> Void)?
     var onConfigChanged: (() -> Void)?
+    var onPaneChanged: ((SettingsPane?) -> Void)?
+    var onWatchdogEnabled: (() -> Void)?
     var setDisablePhysical: ((Bool) -> Void)?
     var setPaused: ((Bool) -> Void)?
     var restorePhysical: (() -> Void)?
+
+    private func clampToVisibleScreen(_ window: NSWindow) {
+        guard let screen = window.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        var origin = window.frame.origin
+        if window.frame.maxY > visible.maxY {
+            origin.y = max(visible.minY, visible.maxY - window.frame.height)
+        }
+        if origin.y < visible.minY {
+            origin.y = visible.minY
+        }
+        if origin != window.frame.origin {
+            window.setFrameOrigin(origin)
+        }
+    }
 
     /// - Parameter pane: 打开时展开的面板，nil 表示全部收起
     func show(pane: SettingsPane? = nil) {
         if let window, let model {
             if let pane, model.expanded != pane { model.toggle(pane) }
+            clampToVisibleScreen(window)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -558,6 +679,8 @@ final class SettingsWindowController {
         let model = SettingsModel()
         model.expanded = (pane == .fallback && !model.fallbackAvailable) ? nil : pane
         model.onConfigChanged = onConfigChanged
+        model.onPaneChanged = onPaneChanged
+        model.onWatchdogEnabled = onWatchdogEnabled
         model.setDisablePhysical = setDisablePhysical
         model.setPaused = setPaused
         model.restorePhysical = restorePhysical
@@ -576,6 +699,11 @@ final class SettingsWindowController {
         w.isReleasedWhenClosed = false
         w.setContentSize(hosting.view.fittingSize)  // 先定好尺寸再居中，否则按 0×0 居中会偏到右侧
         w.center()
+        clampToVisibleScreen(w)
+        NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: w, queue: .main) { [weak self, weak w] _ in
+            guard let w else { return }
+            self?.clampToVisibleScreen(w)
+        }
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
             self?.model?.stop()
             self?.model = nil

@@ -4,14 +4,29 @@ import CoreGraphics
 import Foundation
 import SwiftUI
 
+struct DiagnosticSnapshot {
+    let conflicts: [String]
+    let iccURLs: [URL]
+    let hasMarkers: Bool
+    let report: String
+
+    var hasConflict: Bool { !conflicts.isEmpty }
+    var iccCount: Int { iccURLs.count }
+}
+
 enum Diagnostics {
     static let colorSyncDisplaysDir = URL(fileURLWithPath: "/Library/ColorSync/Profiles/Displays")
     static let conflictingLaunchAgentLabel = "com.oldwinter.uu-display-adapter"
+    static let iccCleanupCommand = "sudo rm -f '/Library/ColorSync/Profiles/Displays/UUyc companion-'*.icc"
+
+    static var conflictingLaunchAgentPlistURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/\(conflictingLaunchAgentLabel).plist")
+    }
 
     static func conflictingAdapters() -> [String] {
         var found: [String] = []
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let agentPlist = home.appendingPathComponent("Library/LaunchAgents/\(conflictingLaunchAgentLabel).plist")
+        let agentPlist = conflictingLaunchAgentPlistURL
         if FileManager.default.fileExists(atPath: agentPlist.path) {
             found.append("LaunchAgent 配置：\(agentPlist.path)")
         }
@@ -52,6 +67,27 @@ enum Diagnostics {
         !conflictingAdapters().isEmpty
     }
 
+    /// 停用旧版冲突 LaunchAgent（由用户点击诊断面板按钮后触发）
+    static func bootoutConflictingAdapter() -> (success: Bool, message: String) {
+        let uid = getuid()
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = ["bootout", "gui/\(uid)/\(conflictingLaunchAgentLabel)"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+            p.waitUntilExit()
+            if p.terminationStatus == 0 {
+                Log.info("已停用旧版冲突服务：\(conflictingLaunchAgentLabel)")
+                return (true, "已停用旧版显示适配服务 \(conflictingLaunchAgentLabel)。")
+            }
+            return (false, "launchctl bootout 返回 \(p.terminationStatus)，可能该服务已停止或需要手动移除配置。")
+        } catch {
+            return (false, "停用失败：\(error.localizedDescription)")
+        }
+    }
+
     static func iccProfileURLs() -> [URL] {
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: colorSyncDisplaysDir,
@@ -73,7 +109,7 @@ enum Diagnostics {
         return Array(text.split(separator: "\n", omittingEmptySubsequences: false).suffix(maxLines).map(String.init))
     }
 
-    static func generateReport() -> String {
+    static func collectSnapshot() -> DiagnosticSnapshot {
         var lines: [String] = []
         let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "dev"
         let buildPath = Bundle.main.bundlePath
@@ -130,6 +166,7 @@ enum Diagnostics {
         let pending = PhysicalDisplays.pending
         lines.append("  disabled-displays.json：\(pending.map { "\($0)" } ?? "无")")
         let sessionURL = ConfigStore.dir.appendingPathComponent("session.json")
+        let sessionExists = FileManager.default.fileExists(atPath: sessionURL.path)
         if let rawSession = try? String(contentsOf: sessionURL, encoding: .utf8) {
             lines.append("  session.json：\(rawSession.trimmingCharacters(in: .whitespacesAndNewlines))")
         } else {
@@ -146,10 +183,11 @@ enum Diagnostics {
             conflicts.forEach { lines.append("    - \($0)") }
             lines.append("    停用命令：launchctl bootout gui/\(getuid())/\(conflictingLaunchAgentLabel)")
         }
-        let iccCount = iccProfileCount()
+        let iccURLs = iccProfileURLs()
+        let iccCount = iccURLs.count
         lines.append("  ColorSync UUyc companion ICC 文件数：\(iccCount)\(iccCount > 3 ? "（偏多，建议清理历史残留）" : "")")
         if iccCount > 3 {
-            lines.append("  清理命令（退出 App 后执行）：sudo rm -f '/Library/ColorSync/Profiles/Displays/UUyc companion-'*.icc")
+            lines.append("  清理命令（退出 App 后执行）：\(iccCleanupCommand)")
         }
         lines.append("")
 
@@ -160,7 +198,16 @@ enum Diagnostics {
         } else {
             tail.forEach { lines.append("  \($0)") }
         }
-        return lines.joined(separator: "\n")
+        return DiagnosticSnapshot(
+            conflicts: conflicts,
+            iccURLs: iccURLs,
+            hasMarkers: pending != nil || sessionExists,
+            report: lines.joined(separator: "\n")
+        )
+    }
+
+    static func generateReport() -> String {
+        collectSnapshot().report
     }
 }
 
@@ -169,21 +216,43 @@ final class DiagnosticsModel: ObservableObject {
     @Published var hasConflict = false
     @Published var iccCount = 0
     @Published var hasMarkers = false
+    @Published var isRefreshing = false
     @Published var copiedHint = false
+    @Published var copiedText = "已复制报告"
+    @Published var actionMessage: String?
 
     var onClearMarkers: (() -> Void)?
+    private var refreshGeneration = 0
 
     func refresh() {
-        hasConflict = Diagnostics.hasConflictingAdapter()
-        iccCount = Diagnostics.iccProfileCount()
-        let sessionExists = FileManager.default.fileExists(atPath: ConfigStore.dir.appendingPathComponent("session.json").path)
-        hasMarkers = PhysicalDisplays.pending != nil || sessionExists
-        report = Diagnostics.generateReport()
+        refreshGeneration += 1
+        let gen = refreshGeneration
+        isRefreshing = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let snap = Diagnostics.collectSnapshot()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.refreshGeneration == gen else { return }
+                self.isRefreshing = false
+                self.hasConflict = snap.hasConflict
+                self.iccCount = snap.iccCount
+                self.hasMarkers = snap.hasMarkers
+                self.report = snap.report
+            }
+        }
     }
 
     func copyReport() {
+        copyToPasteboard(report, label: "已复制报告")
+    }
+
+    func copyICCCleanCommand() {
+        copyToPasteboard(Diagnostics.iccCleanupCommand, label: "已复制命令")
+    }
+
+    private func copyToPasteboard(_ content: String, label: String) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(report, forType: .string)
+        NSPasteboard.general.setString(content, forType: .string)
+        copiedText = label
         copiedHint = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.copiedHint = false }
     }
@@ -193,6 +262,32 @@ final class DiagnosticsModel: ObservableObject {
             NSWorkspace.shared.activateFileViewerSelecting([Log.fileURL])
         } else {
             NSWorkspace.shared.open(Log.fileURL.deletingLastPathComponent())
+        }
+    }
+
+    func openColorSyncDir() {
+        NSWorkspace.shared.open(Diagnostics.colorSyncDisplaysDir)
+    }
+
+    func revealConflictPlist() {
+        let url = Diagnostics.conflictingLaunchAgentPlistURL
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.open(url.deletingLastPathComponent())
+        }
+    }
+
+    func stopConflictingAdapter() {
+        isRefreshing = true
+        actionMessage = nil
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let res = Diagnostics.bootoutConflictingAdapter()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.actionMessage = res.message
+                self.refresh()
+            }
         }
     }
 
@@ -209,25 +304,43 @@ struct DiagnosticsView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("诊断与日志").font(.title2.bold())
+                if model.isRefreshing {
+                    ProgressView().controlSize(.small)
+                }
                 Spacer()
                 if model.copiedHint {
-                    Label("已复制报告", systemImage: "checkmark.circle.fill")
+                    Label(model.copiedText, systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
                 }
-                Button("刷新") { model.refresh() }
-                Button("复制报告") { model.copyReport() }
+                Button("刷新") { model.refresh() }.disabled(model.isRefreshing)
+                Button("复制报告") { model.copyReport() }.disabled(model.report.isEmpty)
                 Button("打开日志文件") { model.openLog() }
                 if model.hasMarkers {
                     Button("清理残留恢复标记") { model.clearMarkers() }
                 }
             }
 
+            if let msg = model.actionMessage {
+                Text(msg)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
+            }
+
             if model.hasConflict {
-                HStack(alignment: .top, spacing: 8) {
+                HStack(alignment: .center, spacing: 10) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text("检测到旧版 `uu-display-adapter` 正同时运行，可能与 UU远程伴侣 争抢显示器配置。建议执行 `launchctl bootout gui/$(id -u)/com.oldwinter.uu-display-adapter`。")
+                    Text("检测到旧版 `uu-display-adapter` 正同时运行，可能与 UU远程伴侣 争抢显示器配置。")
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    Button("在访达中定位") { model.revealConflictPlist() }
+                    Button("一键停用冲突服务") { model.stopConflictingAdapter() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isRefreshing)
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -235,11 +348,14 @@ struct DiagnosticsView: View {
             }
 
             if model.iccCount > 3 {
-                HStack(alignment: .top, spacing: 8) {
+                HStack(alignment: .center, spacing: 10) {
                     Image(systemName: "info.circle.fill").foregroundStyle(.blue)
-                    Text("系统 ColorSync 目录存在 \(model.iccCount) 个 `UUyc companion` 描述文件。新版已固定虚拟屏序列号避免继续膨胀；历史文件可在退出 App 后用 `sudo rm -f '/Library/ColorSync/Profiles/Displays/UUyc companion-'*.icc` 清理。")
+                    Text("系统 ColorSync 目录存在 \(model.iccCount) 个 `UUyc companion` 描述文件（新版已固定序列号避免继续增长）。")
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    Button("打开目录") { model.openColorSyncDir() }
+                    Button("复制清理命令") { model.copyICCCleanCommand() }
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -247,7 +363,7 @@ struct DiagnosticsView: View {
             }
 
             ScrollView {
-                Text(model.report)
+                Text(model.report.isEmpty ? "正在后台采集诊断信息…" : model.report)
                     .font(.system(size: 12, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -257,7 +373,7 @@ struct DiagnosticsView: View {
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1)))
         }
         .padding(20)
-        .frame(width: 720, height: 540)
+        .frame(width: 740, height: 540)
         .onAppear { model.refresh() }
     }
 }

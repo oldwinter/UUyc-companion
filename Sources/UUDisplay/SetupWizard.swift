@@ -49,6 +49,16 @@ final class WizardModel: ObservableObject {
         refreshFromUU()
     }
 
+    func openUUMainWindow() {
+        guard trusted else {
+            message = "需要先完成授权，才能唤醒 UU远程 主界面。"
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            UUReader.showMainWindow()
+        }
+    }
+
     /// 从 UU远程「全部设备」异步导入；保留已配置的自定义分辨率并按行自动保存
     func refreshFromUU() {
         trusted = UUReader.isTrusted
@@ -187,65 +197,89 @@ struct DeviceRow: View {
             HStack(spacing: 10) {
                 DeviceIcon(cfg: cfg)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(cfg.name).font(.system(size: 14)).lineLimit(1)
-                    if cfg.kind != .computer && !cfg.hasSize {
-                        Text("填写或选预设后生效").font(.caption).foregroundStyle(.orange).lineLimit(1)
+                    Text(cfg.name).font(.system(size: 14, weight: .medium)).lineLimit(1)
+                    if cfg.kind != .computer {
+                        if cfg.hasSize {
+                            Text(cfg.detailSummary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        } else {
+                            Text("待填写分辨率").font(.caption).foregroundStyle(.orange).lineLimit(1)
+                        }
+                    } else if cfg.hasSize {
+                        Text("不指定（已保留 \(cfg.width)×\(cfg.height)）").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
-                .frame(width: 132, alignment: .leading)
+                .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
 
                 Picker("", selection: customBinding) {
                     Text("不指定").tag(false)
                     Text("自定义").tag(true)
                 }
-                .pickerStyle(.segmented).labelsHidden().frame(width: 132)
+                .pickerStyle(.segmented).labelsHidden().frame(width: 126)
 
                 if cfg.kind == .computer {
-                    Text("不指定虚拟屏分辨率，由 UU远程 决定").foregroundStyle(.secondary).lineLimit(1)
+                    Text("不指定，由 UU远程 决定")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .frame(width: 298, alignment: .leading)
                 } else {
-                    TextField("宽", value: sizeBinding(\.width), format: .number.grouping(.never))
-                        .frame(width: 56).multilineTextAlignment(.trailing)
-                    Text("×")
-                    TextField("高", value: sizeBinding(\.height), format: .number.grouping(.never))
-                        .frame(width: 56)
+                    HStack(spacing: 6) {
+                        TextField("宽", value: sizeBinding(\.width), format: .number.grouping(.never))
+                            .frame(width: 56).multilineTextAlignment(.trailing)
+                        Text("×").foregroundStyle(.secondary)
+                        TextField("高", value: sizeBinding(\.height), format: .number.grouping(.never))
+                            .frame(width: 56)
 
-                    Button {
-                        let oldW = cfg.width
-                        cfg.width = cfg.height
-                        cfg.height = oldW
-                    } label: {
-                        Image(systemName: "arrow.left.arrow.right")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("交换横竖屏宽高")
-                    .disabled(cfg.width == 0 && cfg.height == 0)
-
-                    Menu("预设") {
-                        if let suggested = Presets.suggestedPreset(for: cfg.name) {
-                            Button("推荐：\(suggested.title) (\(suggested.sizeText))") { applyPreset(suggested) }
-                            Divider()
+                        Button {
+                            let oldW = cfg.width
+                            cfg.width = cfg.height
+                            cfg.height = oldW
+                        } label: {
+                            Image(systemName: "arrow.left.arrow.right")
                         }
-                        ForEach(Presets.categories, id: \.self) { category in
-                            let items = Presets.all.filter { $0.category == category }
-                            Menu(category) {
-                                ForEach(items) { preset in
-                                    Button("\(preset.title) (\(preset.sizeText)\(preset.hiDPI ? " HiDPI" : ""))") {
-                                        applyPreset(preset)
+                        .buttonStyle(.borderless)
+                        .help("交换横竖屏宽高")
+                        .disabled(cfg.width == 0 && cfg.height == 0)
+
+                        Menu("预设") {
+                            if let suggested = Presets.suggestedPreset(for: cfg.name) {
+                                Button("推荐：\(suggested.title) (\(suggested.sizeText))") { applyPreset(suggested) }
+                                Divider()
+                            }
+                            ForEach(Presets.categories, id: \.self) { category in
+                                let items = Presets.all.filter { $0.category == category }
+                                Menu(category) {
+                                    ForEach(items) { preset in
+                                        Button("\(preset.title) (\(preset.sizeText))") {
+                                            applyPreset(preset)
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    .frame(width: 66)
+                        .frame(width: 64)
 
-                    Toggle("HiDPI", isOn: $cfg.hiDPI)
-                        .help("高清视网膜缩放：开启后物理像素倍增、文字更清晰")
+                        Toggle("HiDPI", isOn: $cfg.hiDPI)
+                            .help("高清视网膜缩放：开启后物理像素倍增、文字更清晰")
+                    }
+                    .frame(width: 298, alignment: .leading)
                 }
-                Spacer(minLength: 0)
             }
 
             if cfg.kind != .computer {
-                if let typo = Presets.typoSuggestion(width: cfg.width, height: cfg.height) {
+                if !cfg.hasSize, let suggested = Presets.suggestedPreset(for: cfg.name) {
+                    Button {
+                        applyPreset(suggested)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "sparkles")
+                            Text("检测到匹配预设：点此一键填入 \(suggested.title)（\(suggested.sizeText)）")
+                        }
+                        .font(.caption)
+                    }
+                    .buttonStyle(.link)
+                    .padding(.leading, 44)
+                } else if let typo = Presets.typoSuggestion(width: cfg.width, height: cfg.height) {
                     Button {
                         cfg.width = typo.width
                         cfg.height = typo.height
@@ -324,20 +358,49 @@ struct WizardView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     let computers = model.computers
-                    if !computers.isEmpty {
-                        DeviceGroupHeader(title: "电脑", count: computers.count, collapsed: $model.collapsedComputers)
-                        if !model.collapsedComputers {
-                            ForEach(computers, id: \.wrappedValue.id) { DeviceRow(cfg: $0) }
-                        }
-                    }
                     let mobiles = model.mobiles
-                    if !mobiles.isEmpty {
-                        DeviceGroupHeader(title: "手机/平板", count: mobiles.count, collapsed: $model.collapsedMobiles)
-                        if !model.collapsedMobiles {
-                            Text("💡 可从每行右侧「预设」菜单直接选择常见手机、折叠屏与 iPad 分辨率，或点 ⇄ 一键切换横竖屏。")
-                                .font(.callout).foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                            ForEach(mobiles, id: \.wrappedValue.id) { DeviceRow(cfg: $0) }
+                    if computers.isEmpty && mobiles.isEmpty {
+                        VStack(spacing: 12) {
+                            Image(systemName: "ipad.and.iphone")
+                                .font(.system(size: 36, weight: .light))
+                                .foregroundStyle(.secondary)
+                            Text("暂无已同步的设备")
+                                .font(.headline)
+                            Text("请先在 UU远程 登录设备并切换到「全部设备」页面，然后点击下方刷新按钮。")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 420)
+                            HStack(spacing: 10) {
+                                Button("唤醒 UU远程 主界面") { model.openUUMainWindow() }
+                                    .disabled(!model.trusted)
+                                Button(model.refreshing ? "正在读取…" : "从 UU远程 刷新设备") { model.refreshFromUU() }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(model.refreshing || !model.trusted)
+                            }
+                        }
+                        .padding(28)
+                        .frame(maxWidth: .infinity)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08)))
+                    } else {
+                        if !computers.isEmpty {
+                            DeviceGroupHeader(title: "电脑", count: computers.count, collapsed: $model.collapsedComputers)
+                            if !model.collapsedComputers {
+                                Text("💻 通常保持「不指定」即可；若从 Windows / Mac 远控无头 Mac 遇到分辨率过低或比例黑边，也可切为「自定义」指定 1080p / 2K / HiDPI 虚拟屏。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                ForEach(computers, id: \.wrappedValue.id) { DeviceRow(cfg: $0) }
+                            }
+                        }
+                        if !mobiles.isEmpty {
+                            DeviceGroupHeader(title: "手机/平板", count: mobiles.count, collapsed: $model.collapsedMobiles)
+                            if !model.collapsedMobiles {
+                                Text("💡 可从每行右侧「预设」菜单直接选择常见手机、折叠屏与 iPad 分辨率，或点 ⇄ 一键切换横竖屏。")
+                                    .font(.callout).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                ForEach(mobiles, id: \.wrappedValue.id) { DeviceRow(cfg: $0) }
+                            }
                         }
                     }
                 }
@@ -345,7 +408,7 @@ struct WizardView: View {
             }
             .frame(minHeight: 220)
         }
-        .padding(embedded ? 20 : 20)
-        .frame(minWidth: embedded ? nil : 820, minHeight: 460)
+        .padding(embedded ? 18 : 20)
+        .frame(minWidth: embedded ? nil : 820, minHeight: embedded ? nil : 460)
     }
 }

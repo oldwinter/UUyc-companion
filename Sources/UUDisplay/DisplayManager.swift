@@ -142,6 +142,14 @@ final class DisplayManager {
     /// 远控会话状态变更时同步触发状态机评估（如 keepWarm 转入远控会话需激活防休眠/熄屏检查）
     func syncSessionState() { kick() }
 
+    /// 屏幕唤醒后立即推进一次状态检查（唤醒后尽快完成延迟的分辨率与物理屏还原）
+    func pokeAfterWake() {
+        guard !busy else { return }
+        if physicalOff || !savedStates.isEmpty || desired != nil {
+            step()
+        }
+    }
+
     /// 快捷键 / 菜单 / 关闭开关：立即恢复物理屏，虚拟屏保留
     func restorePhysicalNow(override: Bool = true) {
         if override { physicalOverride = true }
@@ -461,8 +469,21 @@ final class DisplayManager {
         var usedSerial = primarySerial
         var created = makeVirtualDisplay(serial: primarySerial)
         if created == nil {
+            let inUse = Set(serialByDisplayID.values)
+            for salt: UInt32 in 1...4 {
+                let candidate = DisplayManager.stableSerial(name: cfg.name, pixelWidth: w, pixelHeight: h, hiDPI: cfg.hiDPI, salt: salt)
+                if candidate == primarySerial || inUse.contains(candidate) { continue }
+                Log.info("⚠️ 主稳定序列号建屏返回 nil，尝试确定性备用盐 #\(salt)")
+                if let retry = makeVirtualDisplay(serial: candidate) {
+                    created = retry
+                    usedSerial = candidate
+                    break
+                }
+            }
+        }
+        if created == nil {
             let fallbackSerial = UInt32.random(in: 1...0xFFFF_FFF0)
-            Log.info("⚠️ 使用稳定序列号创建虚拟屏返回 nil，尝试备用序列号重试")
+            Log.info("⚠️ 确定性序列号重试均返回 nil，回退随机序列号")
             created = makeVirtualDisplay(serial: fallbackSerial)
             usedSerial = fallbackSerial
         }

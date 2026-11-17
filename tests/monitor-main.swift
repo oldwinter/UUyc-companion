@@ -95,6 +95,13 @@ enum Log { static func info(_ message: String) {} }
         precondition(idleReads <= 2, "空闲时不应每秒刷 AX，实际 idleReads=\(idleReads)")
         precondition(trustEvents == [true], "启动首拍应回调一次权限状态")
 
+        // 空闲节流期间调用 poke() 应立即唤醒 AX 读取而不必等满 5 秒
+        lock.lock(); adaptiveReads = 0; lock.unlock()
+        adaptiveMonitor.poke()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        lock.lock(); let pokeReads = adaptiveReads; lock.unlock()
+        precondition(pokeReads == 1, "poke() 应在节流窗口内立即触发一次 AX 读取，实际 pokeReads=\(pokeReads)")
+
         // overlay 从 false 变为 true：下一拍立即唤醒 AX 读取，无需等待 5 秒空闲间隔
         lock.lock()
         adaptiveOverlay = true

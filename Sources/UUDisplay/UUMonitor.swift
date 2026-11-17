@@ -72,6 +72,14 @@ final class UUMonitor {
         readInFlight = false
     }
 
+    /// 唤醒后立即刷新一次，跳过空闲节流周期
+    func poke() {
+        controllersReadAt = .distantPast
+        if timer != nil {
+            tick()
+        }
+    }
+
     private func tick() {
         let isTrusted = trusted()
         if lastTrusted != isTrusted {

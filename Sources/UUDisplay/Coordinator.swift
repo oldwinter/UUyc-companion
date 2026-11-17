@@ -18,11 +18,18 @@ final class Coordinator {
     private var openingUUWindow = false
     private var swappedOrientation = false
     private var shuttingDown = false
+    private var wakeObserver: NSObjectProtocol?
 
     /// 调试：模拟连入的控制端名称（不读 UU）
     var simulatedName: String?
 
     var connected: Bool { monitor.connected || simulatedName != nil }
+
+    deinit {
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
+    }
 
     func start() {
         display.shouldDisablePhysical = { [weak self] in self?.physicalDisableAllowed ?? false }
@@ -33,6 +40,17 @@ final class Coordinator {
         monitor.onControllersUpdate = { [weak self] controllers in self?.handleControllersUpdate(controllers) }
         monitor.onTrustChange = { [weak self] _ in self?.onChange?() }
         monitor.start()
+        if wakeObserver == nil {
+            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.screensDidWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Log.info("检测到屏幕唤醒，立即检查显示恢复与远控状态")
+                self?.monitor.poke()
+                self?.display.pokeAfterWake()
+            }
+        }
         applyKeepWarmIfIdle()
     }
 
@@ -374,6 +392,10 @@ final class Coordinator {
 
     func shutdown(completion: @escaping () -> Void) {
         shuttingDown = true
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            self.wakeObserver = nil
+        }
         monitor.stop()
         display.remove(completion: completion)
     }

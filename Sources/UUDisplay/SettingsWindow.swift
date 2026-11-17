@@ -528,6 +528,10 @@ struct SettingsView: View {
         }
     }
 
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.0"
+    }
+
     private var statusBadgeColor: Color {
         if !model.axGranted { return .orange }
         if !model.autoVirtual { return .secondary }
@@ -621,8 +625,11 @@ struct SettingsView: View {
 
             Divider()
 
-            // 下：关于 / 完全退出
+            // 下：版本号 / 关于 / 完全退出
             HStack(spacing: 10) {
+                Text("UU远程伴侣 v\(appVersion)")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
                 Spacer()
                 Button("关于 UU远程伴侣") { model.showAbout() }
                 Button("完全退出", role: .destructive) { model.quitCompletely() }

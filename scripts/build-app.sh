@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 APP_NAME="UUyc companion"
 APP="build/$APP_NAME.app"
 LEGACY_APP="/Applications/UUDisplay.app"   # 改名前的安装位置

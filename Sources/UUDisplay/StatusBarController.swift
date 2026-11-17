@@ -136,6 +136,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        menu.addItem(action("打开 UU远程 主界面", #selector(openUURemote)))
         menu.addItem(action("诊断与日志…", #selector(openDiagnosticsPanel)))
         menu.addItem(action("设置…", #selector(reconfigure), key: ","))
         menu.addItem(.separator())
@@ -240,6 +241,20 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     @objc private func toggleDisablePhysical() { coordinator.setDisablePhysical(!store.config.shouldDisablePhysical) }
 
     @objc private func restorePhysicalNow() { coordinator.restorePhysical() }
+
+    @objc private func openUURemote() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let shown = UUReader.showMainWindow()
+            DispatchQueue.main.async {
+                if !shown {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/UURemote.app"))
+                }
+                if let app = UUReader.app {
+                    app.activate(options: .activateAllWindows)
+                }
+            }
+        }
+    }
 
     @objc private func openDiagnosticsPanel() { openDiagnostics() }
 

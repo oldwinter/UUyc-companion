@@ -24,11 +24,19 @@ final class WizardModel: ObservableObject {
         trusted = UUReader.isTrusted
         rows = store.config.devices
         loading = false
+        updateDefaultCollapse()
         if rows.isEmpty && trusted {
             refreshFromUU()
         } else if !trusted {
             message = "需要先完成授权，才能自动从 UU远程 读取设备列表。"
         }
+    }
+
+    /// 存在手机/平板且所有电脑端均为默认「不指定」时，默认折叠电脑分组以突出需配置的移动设备
+    private func updateDefaultCollapse() {
+        let hasMobiles = rows.contains { !$0.inComputerGroup }
+        let allComputersDefault = rows.filter { $0.inComputerGroup }.allSatisfy { $0.kind == .computer }
+        collapsedComputers = hasMobiles && allComputersDefault
     }
 
     var computers: [Binding<DeviceConfig>] { bindings { $0.inComputerGroup } }
@@ -96,6 +104,7 @@ final class WizardModel: ObservableObject {
                 self.loading = true
                 self.rows = merged
                 self.loading = false
+                self.updateDefaultCollapse()
                 self.message = "已从 UU远程 同步 \(found.count) 台设备（不含这台 Mac），并已自动保存。"
                 self.save()
             }
@@ -205,7 +214,7 @@ struct DeviceRow: View {
                             Text("待填写分辨率").font(.caption).foregroundStyle(.orange).lineLimit(1)
                         }
                     } else if cfg.hasSize {
-                        Text("不指定（已保留 \(cfg.width)×\(cfg.height)）").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Text(verbatim: "不指定（已保留 \(cfg.width)×\(cfg.height)）").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
                 .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
@@ -273,7 +282,7 @@ struct DeviceRow: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "sparkles")
-                            Text("检测到匹配预设：点此一键填入 \(suggested.title)（\(suggested.sizeText)）")
+                            Text(verbatim: "检测到匹配预设：点此一键填入 \(suggested.title)（\(suggested.sizeText)）")
                         }
                         .font(.caption)
                     }
@@ -286,7 +295,7 @@ struct DeviceRow: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "wand.and.stars")
-                            Text("疑似误输 \(cfg.width)×\(cfg.height)，点此一键修正为 \(typo.width)×\(typo.height)")
+                            Text(verbatim: "疑似误输 \(cfg.width)×\(cfg.height)，点此一键修正为 \(typo.width)×\(typo.height)")
                         }
                         .font(.caption)
                     }
@@ -295,7 +304,7 @@ struct DeviceRow: View {
                     .padding(.leading, 44)
                 } else if cfg.needsEvenAlignment {
                     let aligned = cfg.effectivePixels
-                    Text("提示：HiDPI 模式下奇数像素将自动对齐为偶数（实际生成 \(aligned.width)×\(aligned.height)）")
+                    Text(verbatim: "提示：HiDPI 模式下奇数像素将自动对齐为偶数（实际生成 \(aligned.width)×\(aligned.height)）")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.leading, 44)
@@ -310,11 +319,12 @@ struct DeviceRow: View {
     }
 }
 
-/// 仿 UU「全部设备」的分组标题：⌄ 电脑 3
+/// 仿 UU「全部设备」的分组标题：⌄ 手机/平板 1
 struct DeviceGroupHeader: View {
     let title: String
     let count: Int
     @Binding var collapsed: Bool
+    var collapsedHint: String? = nil
 
     var body: some View {
         Button {
@@ -325,7 +335,10 @@ struct DeviceGroupHeader: View {
                     .font(.system(size: 11, weight: .semibold))
                     .rotationEffect(.degrees(collapsed ? -90 : 0))
                 Text(title).font(.system(size: 13, weight: .semibold))
-                Text("\(count)").foregroundStyle(.secondary)
+                Text(verbatim: "\(count)").foregroundStyle(.secondary)
+                if collapsed, let collapsedHint {
+                    Text(collapsedHint).font(.caption).foregroundStyle(.tertiary)
+                }
             }
             .contentShape(Rectangle())
         }
@@ -384,15 +397,6 @@ struct WizardView: View {
                         .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
                         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08)))
                     } else {
-                        if !computers.isEmpty {
-                            DeviceGroupHeader(title: "电脑", count: computers.count, collapsed: $model.collapsedComputers)
-                            if !model.collapsedComputers {
-                                Text("💻 通常保持「不指定」即可；若从 Windows / Mac 远控无头 Mac 遇到分辨率过低或比例黑边，也可切为「自定义」指定 1080p / 2K / HiDPI 虚拟屏。")
-                                    .font(.caption).foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                ForEach(computers, id: \.wrappedValue.id) { DeviceRow(cfg: $0) }
-                            }
-                        }
                         if !mobiles.isEmpty {
                             DeviceGroupHeader(title: "手机/平板", count: mobiles.count, collapsed: $model.collapsedMobiles)
                             if !model.collapsedMobiles {
@@ -400,6 +404,20 @@ struct WizardView: View {
                                     .font(.callout).foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                                 ForEach(mobiles, id: \.wrappedValue.id) { DeviceRow(cfg: $0) }
+                            }
+                        }
+                        if !computers.isEmpty {
+                            DeviceGroupHeader(
+                                title: "电脑",
+                                count: computers.count,
+                                collapsed: $model.collapsedComputers,
+                                collapsedHint: "默认不调整屏幕，点击展开可自定义"
+                            )
+                            if !model.collapsedComputers {
+                                Text("💻 通常保持「不指定」即可；若从 Windows / Mac 远控无头 Mac 遇到分辨率过低或比例黑边，也可切为「自定义」指定 1080p / 2K / HiDPI 虚拟屏。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                ForEach(computers, id: \.wrappedValue.id) { DeviceRow(cfg: $0) }
                             }
                         }
                     }

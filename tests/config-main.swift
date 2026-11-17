@@ -76,6 +76,16 @@ import Foundation
         precondition(Presets.suggestedPreset(for: "home win11")?.width == 1920)
         precondition(Presets.suggestedPreset(for: "Xiaomi Pad 7")?.width == 3200)
 
+        // 6. 多盐值确定性序列号：salt 0...4 彼此互异且多次调用一致（避免建屏冲突时回退随机 ICC）
+        let saltedA = (UInt32(0)...4).map {
+            DeviceConfig.stableSerial(name: "vivo X Fold6", pixelWidth: 2312, pixelHeight: 2504, hiDPI: true, salt: $0)
+        }
+        let saltedB = (UInt32(0)...4).map {
+            DeviceConfig.stableSerial(name: "vivo X Fold6", pixelWidth: 2312, pixelHeight: 2504, hiDPI: true, salt: $0)
+        }
+        precondition(saltedA == saltedB, "相同输入与盐值必须产出完全确定性序列号")
+        precondition(Set(saltedA).count == 5, "salt 0...4 产出的序列号必须彼此互异")
+
         print("PASS: Config effectivePixels, presets/typos, per-row merge save, stable FNV-1a serial, variants & detailSummary")
     }
 }

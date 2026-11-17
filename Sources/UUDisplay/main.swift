@@ -49,6 +49,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var terminating = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        if CommandLine.arguments.contains(where: { $0.hasPrefix("--render-") }) {
+            Log.writeToFile = false
+        }
         Log.info("启动 UUDisplay，辅助功能权限：\(UUReader.isTrusted)")
         installMainMenu()
         diagnostics.onClearMarkers = { [weak self] in self?.coordinator.clearResidualRecovery() }

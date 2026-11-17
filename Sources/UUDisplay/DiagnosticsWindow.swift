@@ -17,11 +17,16 @@ struct DiagnosticSnapshot {
 enum Diagnostics {
     static let colorSyncDisplaysDir = URL(fileURLWithPath: "/Library/ColorSync/Profiles/Displays")
     static let conflictingLaunchAgentLabel = "com.oldwinter.uu-display-adapter"
-    static let iccCleanupCommand = "sudo rm -f '/Library/ColorSync/Profiles/Displays/UUyc companion-'*.icc"
+    static let iccCleanupCommand = "sudo rm -f '/Library/ColorSync/Profiles/Displays/UUyc companion'*.icc"
 
     static var conflictingLaunchAgentPlistURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents/\(conflictingLaunchAgentLabel).plist")
+    }
+
+    static var disabledConflictingPlistURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/\(conflictingLaunchAgentLabel).plist.disabled")
     }
 
     static func conflictingAdapters() -> [String] {
@@ -67,7 +72,7 @@ enum Diagnostics {
         !conflictingAdapters().isEmpty
     }
 
-    /// 停用旧版冲突 LaunchAgent（由用户点击诊断面板按钮后触发）
+    /// 停用旧版冲突 LaunchAgent（由用户点击诊断面板按钮后触发）：bootout 服务 + 重命名禁用 plist + 清理残留进程
     static func bootoutConflictingAdapter() -> (success: Bool, message: String) {
         let uid = getuid()
         let p = Process()
@@ -75,16 +80,70 @@ enum Diagnostics {
         p.arguments = ["bootout", "gui/\(uid)/\(conflictingLaunchAgentLabel)"]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
+        var bootoutStatus: Int32 = -1
+        do {
+            try p.run()
+            p.waitUntilExit()
+            bootoutStatus = p.terminationStatus
+        } catch {
+            return (false, "停用失败：\(error.localizedDescription)")
+        }
+
+        let fm = FileManager.default
+        let plistURL = conflictingLaunchAgentPlistURL
+        let disabledURL = disabledConflictingPlistURL
+        if fm.fileExists(atPath: plistURL.path) {
+            try? fm.removeItem(at: disabledURL)
+            do {
+                try fm.moveItem(at: plistURL, to: disabledURL)
+            } catch {
+                return (false, "已卸载服务（\(bootoutStatus)），但禁用 plist 失败：\(error.localizedDescription)")
+            }
+        }
+
+        let pkill = Process()
+        pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        pkill.arguments = ["-u", "\(uid)", "-f", "UUDisplayAdapter/uu-display"]
+        pkill.standardOutput = FileHandle.nullDevice
+        pkill.standardError = FileHandle.nullDevice
+        if (try? pkill.run()) != nil {
+            pkill.waitUntilExit()
+        }
+
+        let remaining = conflictingAdapters()
+        if remaining.isEmpty {
+            Log.info("已彻底停用并禁用旧版冲突服务：\(conflictingLaunchAgentLabel)")
+            return (true, "已停用旧版显示适配服务，并将配置归档为 .plist.disabled。")
+        }
+        return (false, "已执行停用（launchctl=\(bootoutStatus)），但仍检测到残留：\(remaining.joined(separator: "; "))")
+    }
+
+    /// 弹出系统管理员授权清理系统 ColorSync 目录的历史 UUyc companion 描述文件
+    static func cleanICCProfilesWithAdminPrompt() -> (success: Bool, message: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = [
+            "-e",
+            "do shell script \"rm -f '/Library/ColorSync/Profiles/Displays/UUyc companion'*.icc\" with administrator privileges",
+        ]
+        let errPipe = Pipe()
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = errPipe
         do {
             try p.run()
             p.waitUntilExit()
             if p.terminationStatus == 0 {
-                Log.info("已停用旧版冲突服务：\(conflictingLaunchAgentLabel)")
-                return (true, "已停用旧版显示适配服务 \(conflictingLaunchAgentLabel)。")
+                Log.info("已通过管理员授权清理 ColorSync 历史 ICC 描述文件")
+                return (true, "已清理 ColorSync 中的历史 UUyc companion 描述文件。")
             }
-            return (false, "launchctl bootout 返回 \(p.terminationStatus)，可能该服务已停止或需要手动移除配置。")
+            let errText = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if errText.contains("-128") || errText.lowercased().contains("canceled") || errText.lowercased().contains("cancelled") {
+                return (false, "已取消管理员授权，未删除 ColorSync 描述文件。")
+            }
+            return (false, errText.isEmpty ? "清理失败（退出码 \(p.terminationStatus)）" : "清理失败：\(errText)")
         } catch {
-            return (false, "停用失败：\(error.localizedDescription)")
+            return (false, "无法唤起管理员授权：\(error.localizedDescription)")
         }
     }
 
@@ -291,6 +350,19 @@ final class DiagnosticsModel: ObservableObject {
         }
     }
 
+    func cleanICCProfiles() {
+        isRefreshing = true
+        actionMessage = nil
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let res = Diagnostics.cleanICCProfilesWithAdminPrompt()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.actionMessage = res.message
+                self.refresh()
+            }
+        }
+    }
+
     func clearMarkers() {
         onClearMarkers?()
         refresh()
@@ -356,6 +428,9 @@ struct DiagnosticsView: View {
                     Spacer(minLength: 8)
                     Button("打开目录") { model.openColorSyncDir() }
                     Button("复制清理命令") { model.copyICCCleanCommand() }
+                    Button("一键清理…") { model.cleanICCProfiles() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isRefreshing)
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)

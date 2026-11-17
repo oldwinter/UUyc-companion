@@ -1,7 +1,9 @@
-// 线程安全日志：同时输出到 stdout 和 ~/Library/Logs/UUDisplay.log，支持 1MB 自动轮转与连续重复行折叠
+// 线程安全日志：同时输出到 stdout 和 ~/Library/Logs/UUDisplay.log，支持 1MB 自动轮转、POSIX O_APPEND 原子追加与连续重复行折叠
+import Darwin
 import Foundation
 
 enum Log {
+    static var writeToFile = true
     static let fileURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Logs/UUDisplay.log")
     private static let backupURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
@@ -49,14 +51,34 @@ enum Log {
         let line = "[\(fmt.string(from: Date()))] \(msg)\n"
         guard let data = line.data(using: .utf8) else { return }
         FileHandle.standardOutput.write(data)
+        guard writeToFile else { return }
         rotateIfNeeded()
-        if let h = try? FileHandle(forWritingTo: fileURL) {
-            h.seekToEndOfFile()
-            h.write(data)
-            try? h.close()
-        } else {
+        appendData(data)
+    }
+
+    private static func appendData(_ data: Data) {
+        let flags = O_WRONLY | O_CREAT | O_APPEND
+        let mode = mode_t(0o644)
+        var fd = Darwin.open(fileURL.path, flags, mode)
+        if fd < 0 {
             try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? data.write(to: fileURL, options: .atomic)
+            fd = Darwin.open(fileURL.path, flags, mode)
+        }
+        guard fd >= 0 else { return }
+        defer { Darwin.close(fd) }
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var written = 0
+            while written < raw.count {
+                let n = Darwin.write(fd, base.advanced(by: written), raw.count - written)
+                if n > 0 {
+                    written += n
+                } else if n < 0 && errno == EINTR {
+                    continue
+                } else {
+                    break
+                }
+            }
         }
     }
 
